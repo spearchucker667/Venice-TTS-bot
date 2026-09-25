@@ -1,9 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { trimUrlPunctuation } from "@/rich-text-utils";
 
-export { trimUrlPunctuation };
-
-export function parseInline(text: string, key: string): ReactNode[] {
+function parseInline(text: string, key: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/\S+)/g;
   let last = 0;

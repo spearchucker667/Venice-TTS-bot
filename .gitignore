@@ -14,3 +14,6 @@ test-results/
 artifacts/
 .tanstack/
 kimi-export-session_*.md
+.agents/
+.rup/
+HQE_*

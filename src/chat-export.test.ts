@@ -189,7 +189,12 @@ test("legacy unversioned exports parse as version 1", () => {
   assert.equal(parseExportVersion("nope"), null);
   const legacy = {
     chats: [
-      { title: "Kept", turns: [{ role: "user", content: "Hi" }], id: "chat-12345678" },
+      {
+        title: "Kept",
+        turns: [{ role: "user", content: "Hi" }],
+        id: "chat-12345678",
+        updatedAt: 1000,
+      },
       { nope: true },
     ],
   };

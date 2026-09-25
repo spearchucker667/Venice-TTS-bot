@@ -128,6 +128,7 @@ const skipDir = new Set([
   "coverage",
   "artifacts",
   ".git",
+  ".agents",
   "docs/assets",
   "screenshots",
 ]);
@@ -213,7 +214,7 @@ function localLinks(file) {
   let match;
   while ((match = re.exec(text))) {
     const target = match[1] || match[2];
-    if (!target || /^(https?:|mailto:|#)/.test(target)) continue;
+    if (!target || /^(https?:|mailto:|file:|#)/.test(target)) continue;
     const clean = target.split("#")[0]?.split("?")[0] ?? "";
     if (!clean) continue;
     const dest = normalize(resolve(dirname(file), clean));
@@ -224,7 +225,9 @@ function localLinks(file) {
 function walkMd(dir) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (name === "node_modules" || name === ".vercel" || name === "work orders") continue;
+    const relPath = rel(path);
+    if ([...skipDir].some((skip) => relPath === skip || relPath.startsWith(`${skip}/`))) continue;
+    if (name === "work orders") continue;
     // Skip session-export artifacts (e.g. kimi-export-session_*.md)
     if (/^kimi-export-session_/.test(name)) continue;
     const info = statSync(path);
