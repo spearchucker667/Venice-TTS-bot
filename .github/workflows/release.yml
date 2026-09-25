@@ -6,14 +6,16 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -24,7 +26,28 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run typecheck
+      - name: Start dev server for auth check
+        run: |
+          npm run dev > "$RUNNER_TEMP/vite.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/vite.pid"
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8080/__app-env >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Dev server did not become ready"
+          cat "$RUNNER_TEMP/vite.log"
+          exit 1
       - run: npm run check:auth
+      - name: Stop dev server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/vite.pid" ]; then
+            kill $(cat "$RUNNER_TEMP/vite.pid") 2>/dev/null || true
+          fi
       - run: npm test
       - run: npm run build
       - name: SBOM and checksums
