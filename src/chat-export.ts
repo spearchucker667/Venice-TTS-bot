@@ -1,4 +1,11 @@
-import { chatId, sortChats, titleFromTurns, validateTurn, type ChatRecord } from "./chats.ts";
+import {
+  chatId,
+  repairToolTransactions,
+  sortChats,
+  titleFromTurns,
+  validateTurn,
+  type ChatRecord,
+} from "./chats.ts";
 import type { Turn } from "./state.ts";
 
 export const CHAT_EXPORT_VERSION = 1;
@@ -91,70 +98,6 @@ function exportRoot(json: unknown): unknown[] | null {
     return (json as { chats: unknown[] }).chats;
   }
   return null;
-}
-
-type ToolTurn = Extract<Turn, { role: "tool" }>;
-type AssistantTurn = Extract<Turn, { role: "assistant" }>;
-
-/**
- * CHAT-001: validate whole tool transactions. A valid transaction is an
- * assistant turn whose tool_calls are followed immediately by exactly one
- * tool result per call id, in order. Anything else is converted into a safe
- * textual archival assistant turn; orphan tool results are never kept.
- */
-function repairToolTransactions(turns: Turn[], summary: ChatImportSummary): Turn[] {
-  const out: Turn[] = [];
-  let index = 0;
-  while (index < turns.length) {
-    const turn = turns[index] as Turn;
-    if (turn.role === "tool") {
-      summary.droppedOrphanTools += 1;
-      index += 1;
-      continue;
-    }
-    if (turn.role === "assistant" && turn.tool_calls?.length) {
-      const calls = turn.tool_calls;
-      const pending = new Set(calls.map((call) => call.id));
-      let cursor = index + 1;
-      let contiguous = true;
-      const consumed: ToolTurn[] = [];
-      while (cursor < turns.length && pending.size > 0) {
-        const next = turns[cursor] as Turn;
-        if (next.role !== "tool") break;
-        if (!pending.has(next.tool_call_id)) {
-          contiguous = false;
-          break;
-        }
-        pending.delete(next.tool_call_id);
-        consumed.push(next);
-        cursor += 1;
-      }
-      if (contiguous && pending.size === 0 && consumed.length === calls.length) {
-        out.push(turn, ...consumed);
-      } else {
-        summary.archivedTransactions += 1;
-        const names = calls
-          .map((call) => call.name)
-          .filter(Boolean)
-          .join(", ");
-        const note = `[archived incomplete tool call${
-          calls.length === 1 ? "" : "s"
-        }: ${names || "unknown"} — results omitted for safety]`;
-        const archived: AssistantTurn = {
-          role: "assistant",
-          content: turn.content ? `${turn.content}\n\n${note}` : note,
-        };
-        if (turn.thinking) archived.thinking = turn.thinking;
-        if (turn.citations?.length) archived.citations = turn.citations;
-        out.push(archived);
-      }
-      index = cursor;
-      continue;
-    }
-    out.push(turn);
-    index += 1;
-  }
-  return out;
 }
 
 function parseChatRow(

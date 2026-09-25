@@ -39,6 +39,15 @@ import {
   ORB_SHAPES,
   type AppearanceSettings,
 } from "@/theme";
+import {
+  BUILTIN_PROFILES,
+  loadSavedProfiles,
+  saveCustomProfiles,
+  applyProfileToPersona,
+  type SavedProfile,
+} from "@/profiles";
+import { createSettingsExport, parseSettingsExport } from "@/settings-export";
+import { collectDiagnostics, formatDiagnosticsForClipboard } from "@/diagnostics";
 import { useEmber, voicesFor } from "@/use-ember";
 import { resolveTextModel, traitChoices, type Balance } from "@/venice";
 
@@ -154,6 +163,7 @@ export function Studio() {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const name = ember.persona.name.trim() || "Ember";
   const funds = money(ember.balance);
+  const lastAssistantTurn = [...ember.turns].reverse().find((t) => t.role === "assistant");
 
   useEffect(() => {
     applyThemeToDom(appearance.theme, appearance.mode);
@@ -168,6 +178,109 @@ export function Studio() {
       return next;
     });
   }, []);
+
+  const [savedProfiles, setSavedProfiles] = useState<SavedProfile[]>(() => loadSavedProfiles());
+  const [profileNotice, setProfileNotice] = useState<string>("");
+  const [backupFeedback, setBackupFeedback] = useState<string>("");
+
+  const handleExportSettings = useCallback(() => {
+    try {
+      const data = createSettingsExport(appearance, ember.persona, savedProfiles);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ember-settings-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setBackupFeedback("Settings exported successfully (API keys are never included).");
+      setTimeout(() => setBackupFeedback(""), 4000);
+    } catch {
+      setBackupFeedback("Failed to export settings.");
+    }
+  }, [appearance, ember.persona, savedProfiles]);
+
+  const handleImportSettingsFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      e.target.value = "";
+      try {
+        const text = await file.text();
+        const res = parseSettingsExport(text);
+        if (!res.ok) {
+          setBackupFeedback(`Import failed: ${res.error}`);
+          return;
+        }
+        patchAppearance(res.data.appearance);
+        ember.patchPersona({
+          textModel: res.data.defaults.textModel,
+          ttsModel: res.data.defaults.ttsModel,
+          voice: res.data.defaults.voice,
+          sttModel: res.data.defaults.sttModel,
+          speed: res.data.defaults.speed,
+          vad: res.data.defaults.vad,
+          promptMode: res.data.defaults.promptMode,
+          ...(res.data.defaults.generation ?? {}),
+        });
+        if (res.data.profiles?.length) {
+          const merged = [...savedProfiles];
+          for (const p of res.data.profiles) {
+            if (!merged.some((m) => m.id === p.id)) merged.push(p);
+          }
+          setSavedProfiles(merged);
+          saveCustomProfiles(merged);
+        }
+        setBackupFeedback("Settings imported successfully!");
+        setTimeout(() => setBackupFeedback(""), 4000);
+      } catch {
+        setBackupFeedback("Failed to read settings file.");
+      }
+    },
+    [ember, patchAppearance, savedProfiles],
+  );
+
+  const handleCopyDiagnostics = useCallback(async () => {
+    try {
+      const report = collectDiagnostics(appearance, ember.persona, ember.discovery?.fetchedAt);
+      const text = formatDiagnosticsForClipboard(report);
+      await navigator.clipboard.writeText(text);
+      setBackupFeedback("Diagnostics copied to clipboard (API keys and messages redacted).");
+      setTimeout(() => setBackupFeedback(""), 4000);
+    } catch {
+      setBackupFeedback("Could not copy diagnostics.");
+    }
+  }, [appearance, ember.persona, ember.discovery?.fetchedAt]);
+
+  const handleSaveCustomProfile = useCallback(() => {
+    const name = window.prompt("Enter profile name:")?.trim();
+    if (!name) return;
+    const newProfile: SavedProfile = {
+      id: `custom-${Date.now()}`,
+      name,
+      description: "User-saved profile",
+      temperature: ember.persona.temperature,
+      topP: ember.persona.topP,
+      maxTokens: ember.persona.maxTokens,
+      preset: ember.persona.preset,
+      thinking: ember.persona.thinking,
+      webSearch: ember.persona.webSearch,
+      tools: ember.persona.tools,
+      ttsModel: ember.persona.ttsModel,
+      voice: ember.persona.voice,
+      speed: ember.persona.speed,
+      lamp: ember.persona.lamp,
+      flow: ember.persona.flow,
+      orbShape: appearance.orbShape,
+    };
+    const next = [...savedProfiles, newProfile];
+    setSavedProfiles(next);
+    saveCustomProfiles(next);
+    setProfileNotice(`Saved profile "${name}"`);
+    setTimeout(() => setProfileNotice(""), 3000);
+  }, [appearance.orbShape, ember.persona, savedProfiles]);
 
   const openSettings = useCallback(
     (next: SettingsTab) => {
@@ -540,6 +653,13 @@ export function Studio() {
                   >
                     Copy
                   </button>
+                  <button
+                    type="button"
+                    title="Branch a new conversation from this message"
+                    onClick={() => ember.branchFrom(index)}
+                  >
+                    Branch
+                  </button>
                   {turn.role === "assistant" ? (
                     <button type="button" onClick={() => ember.replay(turn.content)}>
                       Speak
@@ -674,6 +794,9 @@ export function Studio() {
         {ember.hydrated && ember.discovery?.notice ? (
           <p className="hint">{ember.discovery.notice}</p>
         ) : null}
+        <div className="sr-only" aria-live="polite">
+          {ember.status ? `Voice status: ${ember.status}` : ""}
+        </div>
         <div className="toggles">
           <button
             type="button"
@@ -682,6 +805,28 @@ export function Studio() {
             onClick={() => ember.setHandsFree((value) => !value)}
           >
             {ember.handsFree ? "Back and forth on" : "Back and forth"}
+          </button>
+          {lastAssistantTurn ? (
+            <button
+              type="button"
+              className="chip"
+              title={`Replay last answer with ${ember.persona.voice || "default voice"}`}
+              onClick={() => ember.replay(lastAssistantTurn.content)}
+            >
+              Replay
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="chip"
+            title="Speech playback speed (cycles 1x, 1.25x, 1.5x)"
+            onClick={() => {
+              const current = ember.persona.speed ?? 1;
+              const next = current >= 1.5 ? 1 : current >= 1.25 ? 1.5 : 1.25;
+              ember.patchPersona({ speed: next });
+            }}
+          >
+            {(ember.persona.speed ?? 1).toFixed(2).replace(/\.00$/, "")}x
           </button>
           <button type="button" className="chip" onClick={ember.stopAll}>
             Stop
@@ -837,6 +982,62 @@ export function Studio() {
                   "Traits and models come from Venice, not a hardcoded list."}
                 {funds ? ` Balance ${funds}.` : ""}
               </p>
+
+              <div
+                style={{
+                  marginTop: "1.25rem",
+                  paddingTop: "1rem",
+                  borderTop: "1px solid var(--line, rgba(255,255,255,0.08))",
+                }}
+              >
+                <h3>Backup & System</h3>
+                <p className="hint">
+                  Export or restore appearance, defaults, and custom profiles. Venice API keys are
+                  strictly excluded from backups.
+                </p>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.5rem",
+                    flexWrap: "wrap",
+                    margin: "0.75rem 0",
+                  }}
+                >
+                  <button type="button" className="ghost" onClick={handleExportSettings}>
+                    Export settings (.json)
+                  </button>
+                  <label
+                    className="ghost"
+                    style={{
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: "0.4rem 0.8rem",
+                      borderRadius: "0.5rem",
+                      border: "1px solid var(--line, rgba(255,255,255,0.15))",
+                    }}
+                  >
+                    <span>Import settings</span>
+                    <input
+                      type="file"
+                      accept=".json"
+                      style={{ display: "none" }}
+                      onChange={handleImportSettingsFile}
+                    />
+                  </label>
+                  <button type="button" className="ghost" onClick={handleCopyDiagnostics}>
+                    Copy diagnostics
+                  </button>
+                </div>
+                {backupFeedback ? (
+                  <p
+                    className="hint"
+                    style={{ color: "var(--color-wax, #d4653a)", margin: "0.25rem 0" }}
+                  >
+                    {backupFeedback}
+                  </p>
+                ) : null}
+              </div>
             </section>
           ) : null}
 
@@ -846,6 +1047,75 @@ export function Studio() {
               <p className="hint">
                 These change inference settings. They do not train or fine-tune the model.
               </p>
+
+              <div style={{ marginBottom: "1.25rem" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "0.25rem",
+                  }}
+                >
+                  <span className="field-label" style={{ fontWeight: 600 }}>
+                    Profiles
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    style={{ fontSize: "0.8rem", padding: "0.2rem 0.5rem" }}
+                    onClick={handleSaveCustomProfile}
+                  >
+                    + Save current as profile
+                  </button>
+                </div>
+                <p className="hint">
+                  Apply curated parameters for coding, research, voice chat, and deep reasoning.
+                </p>
+                <div className="seg wrap" role="group" aria-label="Curated profiles">
+                  {BUILTIN_PROFILES.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      title={p.description}
+                      onClick={() => {
+                        const res = applyProfileToPersona(p, ember.persona);
+                        ember.patchPersona(res.personaPatch);
+                        if (res.orbShape) patchAppearance({ orbShape: res.orbShape });
+                        setProfileNotice(`Applied ${p.name} profile.`);
+                        setTimeout(() => setProfileNotice(""), 3000);
+                      }}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                  {savedProfiles.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      title={p.description || "Custom user profile"}
+                      onClick={() => {
+                        const res = applyProfileToPersona(p, ember.persona);
+                        ember.patchPersona(res.personaPatch);
+                        if (res.orbShape) patchAppearance({ orbShape: res.orbShape });
+                        setProfileNotice(`Applied custom profile: ${p.name}`);
+                        setTimeout(() => setProfileNotice(""), 3000);
+                      }}
+                    >
+                      ★ {p.name}
+                    </button>
+                  ))}
+                </div>
+                {profileNotice ? (
+                  <p
+                    className="hint"
+                    style={{ color: "var(--color-wax, #d4653a)", margin: "0.3rem 0 0" }}
+                  >
+                    {profileNotice}
+                  </p>
+                ) : null}
+              </div>
+
               <Field
                 label="Text model"
                 hint={

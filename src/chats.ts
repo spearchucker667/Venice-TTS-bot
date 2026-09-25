@@ -147,6 +147,94 @@ export function validateTurn(value: unknown): Turn | null {
   return null;
 }
 
+/**
+ * CHAT-001 / 22.4: Validate whole tool transactions atomically.
+ * Preserves complete transactions, safely archives incomplete tool calls,
+ * and strips orphan tool result turns.
+ */
+export function repairToolTransactions(
+  turns: Turn[],
+  summary?: { droppedOrphanTools?: number; archivedTransactions?: number },
+): Turn[] {
+  const out: Turn[] = [];
+  let index = 0;
+  while (index < turns.length) {
+    const turn = turns[index] as Turn;
+    if (turn.role === "tool") {
+      if (summary && typeof summary.droppedOrphanTools === "number") {
+        summary.droppedOrphanTools += 1;
+      }
+      index += 1;
+      continue;
+    }
+    if (turn.role === "assistant" && turn.tool_calls?.length) {
+      const calls = turn.tool_calls;
+      const pending = new Set(calls.map((call) => call.id));
+      let cursor = index + 1;
+      let contiguous = true;
+      const consumed: (Turn & { role: "tool" })[] = [];
+      while (cursor < turns.length && pending.size > 0) {
+        const next = turns[cursor] as Turn;
+        if (next.role !== "tool") break;
+        if (!pending.has(next.tool_call_id)) {
+          contiguous = false;
+          break;
+        }
+        pending.delete(next.tool_call_id);
+        consumed.push(next);
+        cursor += 1;
+      }
+      if (contiguous && pending.size === 0 && consumed.length === calls.length) {
+        out.push(turn, ...consumed);
+      } else {
+        if (summary && typeof summary.archivedTransactions === "number") {
+          summary.archivedTransactions += 1;
+        }
+        const names = calls
+          .map((call) => call.name)
+          .filter(Boolean)
+          .join(", ");
+        const note = `[archived incomplete tool call${
+          calls.length === 1 ? "" : "s"
+        }: ${names || "unknown"} — results omitted for safety]`;
+        const archived: Turn = {
+          role: "assistant",
+          content: turn.content ? `${turn.content}\n\n${note}` : note,
+        };
+        if (turn.thinking) archived.thinking = turn.thinking;
+        if (turn.citations?.length) archived.citations = turn.citations;
+        out.push(archived);
+      }
+      index = cursor;
+      continue;
+    }
+    out.push(turn);
+    index += 1;
+  }
+  return out;
+}
+
+/**
+ * 22.4: Branch from a turn into a new local conversation.
+ * Copies history up to the selected turn atomically, ensuring no orphan tool results
+ * and no mutation of the source conversation.
+ */
+export function branchChat(sourceChat: ChatRecord, upToTurnIndex: number): ChatRecord {
+  const boundedIndex = Math.max(0, Math.min(upToTurnIndex, sourceChat.turns.length - 1));
+  const slice = sourceChat.turns.slice(0, boundedIndex + 1);
+  const turns = repairToolTransactions(slice);
+  const baseTitle = (sourceChat.title || "Chat").replace(/^Branch:\s*/, "");
+  const title = `Branch: ${baseTitle}`.slice(0, 48);
+  return {
+    id: chatId(),
+    title,
+    updatedAt: Date.now(),
+    pinned: false,
+    turns,
+    settings: sourceChat.settings ? { ...sourceChat.settings } : undefined,
+  };
+}
+
 function asPromptMode(value: unknown): PromptMode | null {
   return value === "persona" || value === "character" || value === "blend" ? value : null;
 }

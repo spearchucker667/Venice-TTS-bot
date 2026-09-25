@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { bindLevel, createAudio, type AudioEngine } from "@/audio";
 import {
   blankChat,
+  branchChat,
   clearChats,
   deleteChat,
   listChats,
@@ -949,6 +950,38 @@ export function useEmber() {
       saveMessages(row.turns);
       if (row.settings) {
         const snapshot = row.settings;
+        patchPersona({
+          textModel: snapshot.textModel,
+          systemPrompt: snapshot.systemPrompt,
+          promptMode: snapshot.promptMode,
+          characterSlug: snapshot.characterSlug,
+          temperature: snapshot.temperature,
+          topP: snapshot.topP,
+          maxTokens: snapshot.maxTokens,
+          webSearch: snapshot.webSearch,
+          tools: snapshot.tools,
+        });
+      }
+      setError("");
+    },
+    branchFrom: (turnIndex: number) => {
+      const current = metaRef.current;
+      if (!current || turnIndex < 0 || turnIndex >= turnsRef.current.length) return;
+      stopAll();
+      const source: ChatRecord = {
+        ...current,
+        turns: turnsRef.current,
+        settings: current.settings || snapshotFromPersona(personaRef.current, catalogRevision()),
+      };
+      const branched = branchChat(source, turnIndex);
+      metaRef.current = branched;
+      turnsRef.current = branched.turns;
+      setTurns(branched.turns);
+      saveMessages(branched.turns);
+      setChats((prev) => sortChats([branched, ...prev]));
+      persistChat(branched);
+      if (branched.settings) {
+        const snapshot = branched.settings;
         patchPersona({
           textModel: snapshot.textModel,
           systemPrompt: snapshot.systemPrompt,

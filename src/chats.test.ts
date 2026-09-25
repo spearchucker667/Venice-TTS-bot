@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   blankChat,
+  branchChat,
   clearChats,
   deleteChat,
   listChats,
@@ -311,4 +312,32 @@ test("validateChatRecord keeps valid snapshots and drops malformed ones", () => 
   assert.deepEqual(parsed?.settings, snapshot);
   const broken = validateChatRecord({ ...chat, settings: { textModel: 5, junk: true } });
   assert.equal(broken?.settings, undefined);
+});
+
+test("branchChat creates a new conversation up to the specified turn without mutating source", () => {
+  const source: ChatRecord = {
+    id: "source-12345",
+    title: "Original Topic",
+    updatedAt: 1000,
+    pinned: true,
+    turns: [
+      { role: "user", content: "turn 0" },
+      { role: "assistant", content: "turn 1" },
+      { role: "user", content: "turn 2" },
+      { role: "assistant", content: "turn 3" },
+    ],
+    settings: snapshotFromPersona(DEFAULT_PERSONA),
+  };
+
+  const branched = branchChat(source, 1);
+  assert.notEqual(branched.id, source.id);
+  assert.equal(branched.title, "Branch: Original Topic");
+  assert.equal(branched.turns.length, 2);
+  assert.equal(branched.turns[0]?.content, "turn 0");
+  assert.equal(branched.turns[1]?.content, "turn 1");
+  assert.equal(branched.pinned, false);
+  assert.deepEqual(branched.settings, source.settings);
+
+  // Source remains unmutated
+  assert.equal(source.turns.length, 4);
 });
