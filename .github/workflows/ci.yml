@@ -28,7 +28,32 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run typecheck
-      - run: npm run check:auth
+
+      - name: Start dev server
+        run: |
+          npm run dev > "$RUNNER_TEMP/vite.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/vite.pid"
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8080/__app-env >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Dev server did not become ready"
+          cat "$RUNNER_TEMP/vite.log"
+          exit 1
+
+      - name: Check auth invariant
+        run: npm run check:auth
+
+      - name: Stop dev server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/vite.pid" ]; then
+            kill $(cat "$RUNNER_TEMP/vite.pid") 2>/dev/null || true
+          fi
 
   tests:
     name: Tests
