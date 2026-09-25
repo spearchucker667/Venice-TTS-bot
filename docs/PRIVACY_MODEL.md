@@ -17,16 +17,17 @@ The proxy sees the body because it forwards it. It is not designed to store requ
 
 ## What stays on the device
 
-| Store                          | Key                                                   | Contents                          |
-| ------------------------------ | ----------------------------------------------------- | --------------------------------- |
-| localStorage or sessionStorage | `ember.apiKey`                                        | Venice key                        |
-| localStorage                   | `ember.keyMode.v1`                                    | session or remember               |
-| localStorage                   | `ember.persona.v1`                                    | name, prompt, models, voice, lamp |
-| localStorage                   | `ember.catalog.v1`                                    | last catalog                      |
-| localStorage                   | `ember.hosts.v1`                                      | hosts allowed for read requests   |
-| localStorage                   | `ember.favCharacters.v1`, `ember.recentCharacters.v1` | character slugs                   |
-| sessionStorage                 | `ember.messages.v1`                                   | last 40 turns                     |
-| IndexedDB `ember-chats`        | `chats`                                               | full local chat records           |
+| Store                           | Key                                                   | Contents                                                                 |
+| ------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| localStorage or sessionStorage  | `ember.apiKey`                                        | Venice key                                                               |
+| localStorage                    | `ember.keyMode.v1`                                    | session or remember                                                      |
+| localStorage                    | `ember.persona.v1`                                    | name, prompt, models, voice, lamp                                        |
+| localStorage                    | `ember.catalog.v1`                                    | last catalog                                                             |
+| localStorage                    | `ember.integrations.v1`                               | scoped HTTP integrations the user defined (origin, path prefix, methods) |
+| sessionStorage (in-memory only) | session tool grants                                   | short-lived read approvals; never persisted                              |
+| localStorage                    | `ember.favCharacters.v1`, `ember.recentCharacters.v1` | character slugs                                                          |
+| sessionStorage                  | `ember.messages.v1`                                   | last 40 turns                                                            |
+| IndexedDB `ember-chats`         | `chats`                                               | full local chat records                                                  |
 
 Clearing site data in the browser deletes these. Export writes a JSON file you choose. Import reads a file you choose.
 

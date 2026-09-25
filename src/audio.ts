@@ -42,18 +42,40 @@ export function stopTracks(stream: { getTracks(): Array<{ stop(): void }> } | nu
   stream?.getTracks().forEach((track) => track.stop());
 }
 
+type AudioKit = {
+  ctx: AudioContext;
+  micAnalyser: AnalyserNode;
+  playAnalyser: AnalyserNode;
+  micBuf: Uint8Array<ArrayBuffer>;
+  playBuf: Uint8Array<ArrayBuffer>;
+};
+
 export function createAudio(): AudioEngine {
-  const AudioCtx =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  const ctx = new AudioCtx();
-  const micAnalyser = ctx.createAnalyser();
-  micAnalyser.fftSize = 1024;
-  const playAnalyser = ctx.createAnalyser();
-  playAnalyser.fftSize = 1024;
-  playAnalyser.connect(ctx.destination);
-  const micBuf = new Uint8Array(new ArrayBuffer(micAnalyser.fftSize));
-  const playBuf = new Uint8Array(new ArrayBuffer(playAnalyser.fftSize));
+  // AUDIO-002: the AudioContext and its analysers are created lazily on the
+  // first real audio action, so text-only users never pay for a context and
+  // no autoplay-policy edge case is triggered before a user gesture.
+  let kit: AudioKit | null = null;
+
+  function ensureKit(): AudioKit {
+    if (kit) return kit;
+    const AudioCtor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    const ctx = new AudioCtor();
+    const micAnalyser = ctx.createAnalyser();
+    micAnalyser.fftSize = 1024;
+    const playAnalyser = ctx.createAnalyser();
+    playAnalyser.fftSize = 1024;
+    playAnalyser.connect(ctx.destination);
+    kit = {
+      ctx,
+      micAnalyser,
+      playAnalyser,
+      micBuf: new Uint8Array(new ArrayBuffer(micAnalyser.fftSize)),
+      playBuf: new Uint8Array(new ArrayBuffer(playAnalyser.fftSize)),
+    };
+    return kit;
+  }
 
   let stream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
@@ -61,11 +83,19 @@ export function createAudio(): AudioEngine {
   let recording = false;
   let playing = false;
   let playGen = 0;
-  let source: AudioBufferSourceNode | null = null;
+  // AUDIO-001: scheduling clock shared across streams so back-to-back playback
+  // serializes; reset to 0 on Stop/dispose so a later session can never
+  // inherit scheduled audio from an earlier one.
+  let queueTime = 0;
+  // AUDIO-001: cancel handle for the in-flight PCM stream reader, so Stop
+  // releases a pending read() instead of waiting for the network.
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  // AUDIO-001: every scheduled source is tracked, not just the latest one.
+  const activeSources = new Set<AudioBufferSourceNode>();
   let mime = "";
   let deviceId = "";
 
-  async function ensureMic(): Promise<void> {
+  async function ensureMic(k: AudioKit): Promise<void> {
     if (stream) return;
     stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -75,8 +105,8 @@ export function createAudio(): AudioEngine {
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       },
     });
-    const node = ctx.createMediaStreamSource(stream);
-    node.connect(micAnalyser);
+    const node = k.ctx.createMediaStreamSource(stream);
+    node.connect(k.micAnalyser);
     if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) mime = "audio/webm;codecs=opus";
     else if (MediaRecorder.isTypeSupported("audio/webm")) mime = "audio/webm";
     else if (MediaRecorder.isTypeSupported("audio/mp4")) mime = "audio/mp4";
@@ -122,11 +152,39 @@ export function createAudio(): AudioEngine {
     });
   }
 
+  function cancelPendingRead(): void {
+    const reader = activeReader;
+    activeReader = null;
+    if (!reader) return;
+    try {
+      void Promise.resolve(reader.cancel()).catch(() => {});
+    } catch {
+      /* reader already released */
+    }
+  }
+
+  function haltPlayback(): void {
+    playGen += 1;
+    playing = false;
+    queueTime = 0;
+    cancelPendingRead();
+    for (const node of activeSources) {
+      try {
+        node.stop();
+      } catch {
+        /* already stopped */
+      }
+      node.disconnect();
+    }
+    activeSources.clear();
+  }
+
   return {
     recording: () => recording,
     async startMic() {
-      await ctx.resume();
-      await ensureMic();
+      const k = ensureKit();
+      await k.ctx.resume();
+      await ensureMic(k);
       if (recording) return;
       chunks = [];
       recorder = new MediaRecorder(stream as MediaStream, mime ? { mimeType: mime } : undefined);
@@ -141,20 +199,13 @@ export function createAudio(): AudioEngine {
       await stopRecorder(true);
     },
     level() {
-      if (recording) return rms(micAnalyser, micBuf);
-      if (playing) return rms(playAnalyser, playBuf);
+      if (!kit) return 0;
+      if (recording) return rms(kit.micAnalyser, kit.micBuf);
+      if (playing) return rms(kit.playAnalyser, kit.playBuf);
       return 0;
     },
     stopPlayback() {
-      playGen += 1;
-      playing = false;
-      const current = source;
-      source = null;
-      try {
-        current?.stop();
-      } catch {
-        /* already stopped */
-      }
+      haltPlayback();
     },
     setInput(next) {
       if (next === deviceId) return;
@@ -162,12 +213,15 @@ export function createAudio(): AudioEngine {
       if (!recording) releaseMic();
     },
     async playPcmStream(body, sampleRate, signal) {
-      await ctx.resume();
       if (!body) return;
+      const k = ensureKit();
+      await k.ctx.resume();
+      const { ctx, playAnalyser } = k;
       const token = playGen;
       const reader = body.getReader();
+      activeReader = reader;
       let pending = new Uint8Array(0);
-      let nextTime = ctx.currentTime + 0.06;
+      let nextTime = Math.max(queueTime, ctx.currentTime + 0.06);
       playing = true;
       const play = (bytes: Uint8Array) => {
         if (bytes.byteLength < 2 || token !== playGen) return;
@@ -182,7 +236,12 @@ export function createAudio(): AudioEngine {
         const start = Math.max(nextTime, ctx.currentTime + 0.02);
         node.start(start);
         nextTime = start + audioBuf.duration;
-        source = node;
+        queueTime = nextTime;
+        activeSources.add(node);
+        node.onended = () => {
+          activeSources.delete(node);
+          node.disconnect();
+        };
       };
       const take = (minSamples: number) => {
         const even = pending.byteLength - (pending.byteLength % 2);
@@ -207,6 +266,7 @@ export function createAudio(): AudioEngine {
           await new Promise((resolve) => window.setTimeout(resolve, wait * 1000));
         }
       } finally {
+        if (activeReader === reader) activeReader = null;
         try {
           await reader.cancel();
         } catch {
@@ -215,18 +275,26 @@ export function createAudio(): AudioEngine {
         if (token === playGen) playing = false;
       }
     },
-    async playMp3(data: ArrayBuffer) {
-      await ctx.resume();
+    async playMp3(data) {
+      const k = ensureKit();
+      await k.ctx.resume();
+      const { ctx, playAnalyser } = k;
       const token = playGen;
       const audioBuf = await ctx.decodeAudioData(data.slice(0));
       if (token !== playGen) return;
       const node = ctx.createBufferSource();
       node.buffer = audioBuf;
       node.connect(playAnalyser);
-      source = node;
+      activeSources.add(node);
       playing = true;
       await new Promise<void>((resolve) => {
         node.onended = () => {
+          activeSources.delete(node);
+          try {
+            node.disconnect();
+          } catch {
+            /* noop */
+          }
           if (token === playGen) playing = false;
           resolve();
         };
@@ -234,14 +302,7 @@ export function createAudio(): AudioEngine {
       });
     },
     dispose() {
-      playGen += 1;
-      playing = false;
-      try {
-        source?.stop();
-      } catch {
-        /* noop */
-      }
-      source = null;
+      haltPlayback();
       if (recorder && recorder.state !== "inactive") {
         try {
           recorder.stop();
@@ -252,7 +313,10 @@ export function createAudio(): AudioEngine {
       recorder = null;
       recording = false;
       releaseMic();
-      void ctx.close();
+      if (kit) {
+        void kit.ctx.close();
+        kit = null;
+      }
     },
   };
 }

@@ -41,7 +41,12 @@ The app does not call `POST /api_keys`.
 
 - Web search: off, auto, or on. This is Venice's `enable_web_search` parameter.
 - Tools toggle adds Venice search, Venice scrape, and a browser HTTP tool.
-- Read requests can be remembered per host (`ember.hosts.v1`). Writes always ask. Private, loopback, and metadata addresses are blocked in the browser. Redirects are not followed.
+- Model-driven HTTP is **off unless you scope it**, in one of two ways:
+  - **Integrations** (`ember.integrations.v1` in localStorage): an exact `https://` origin, an optional path prefix, an allowed method set, and a request-body byte bound. Reads inside the scope run without asking; methods outside the set are denied; writes always ask. Add, review, and remove them in Settings → Tools.
+  - **Session approvals**: when a request has no covering integration you can allow it once or for this browser session (30 minutes, never persisted). Writes can only ever be allowed once.
+- The old per-host "remembered reads" grant (`ember.hosts.v1`) no longer exists; a bare-hostname grant was wider than a real integration scope and is purged on startup.
+- Literal private, loopback, link-local, CGNAT, and metadata addresses are rejected, as are URLs with embedded credentials and ports other than 80/443. A browser **cannot verify where an arbitrary hostname resolves**, so the address check is not a categorical private-network block — the scoped consent is the boundary. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
+- Redirects are not followed.
 
 ## Changer
 

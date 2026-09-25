@@ -16,14 +16,12 @@ import {
   contextWindow,
   keyTail,
   loadFavs,
-  loadHosts,
   loadKey,
   loadKeyMode,
   loadMessages,
   loadPersona,
   loadRecentCharacters,
   saveFavs,
-  saveHosts,
   saveKey,
   saveMessages,
   savePersona,
@@ -37,6 +35,16 @@ import {
   type ToolCall,
   type Turn,
 } from "@/state";
+import {
+  directoryPrefix,
+  grantSessionAccess,
+  loadIntegrations,
+  normalizeIntegration,
+  purgeLegacyHosts,
+  saveIntegrations,
+  type HttpIntegration,
+  type IntegrationInput,
+} from "@/tools/integrations";
 import {
   balanceFrom,
   chatBody,
@@ -56,15 +64,24 @@ import {
   VeniceError,
   type Balance,
   type Discovery,
+  type HttpConfirm,
   type VeniceCharacter,
 } from "@/venice";
 
 type PendingHost = {
   host: string;
+  origin: string;
   method: string;
   path: string;
   mutating: boolean;
-  allow: (always: boolean) => void;
+  bodyPreview: string;
+  /** Reads may be scoped to this browser session (never persisted). */
+  canSession: boolean;
+  /** Reads over https may be turned into a durable scoped integration. */
+  canIntegrate: boolean;
+  allowOnce: () => void;
+  allowSession: () => void;
+  allowIntegrate: () => void;
   deny: () => void;
 };
 
@@ -100,7 +117,7 @@ export function useEmber() {
   const [pending, setPending] = useState<PendingHost | null>(null);
   const [busy, setBusy] = useState(false);
   const [chats, setChats] = useState<ChatRecord[]>([]);
-  const [hosts, setHosts] = useState<string[]>([]);
+  const [integrations, setIntegrations] = useState<HttpIntegration[]>([]);
   const [favs, setFavs] = useState<string[]>([]);
   const [recentCharacters, setRecentCharacters] = useState<string[]>([]);
   const [keyMode, setKeyMode] = useState<KeyMode>("remember");
@@ -112,7 +129,7 @@ export function useEmber() {
   const turnsRef = useRef(turns);
   const discoveryRef = useRef(discovery);
   const handsRef = useRef(handsFree);
-  const hostsRef = useRef<string[]>([]);
+  const integrationsRef = useRef<HttpIntegration[]>([]);
   const audioRef = useRef<AudioEngine | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listenGen = useRef(0);
@@ -185,12 +202,14 @@ export function useEmber() {
   useEffect(() => {
     const key = loadKey();
     keyRef.current = key;
-    hostsRef.current = loadHosts();
+    const loaded = loadIntegrations();
+    integrationsRef.current = loaded;
+    purgeLegacyHosts();
     setHasKey(Boolean(key));
     setTail(keyTail(key));
     setKeyMode(loadKeyMode());
     setPersona(loadPersona());
-    setHosts(loadHosts());
+    setIntegrations(loaded);
     setFavs(loadFavs());
     setRecentCharacters(loadRecentCharacters());
     const cached = loadCatalog();
@@ -308,14 +327,30 @@ export function useEmber() {
     commitKey("");
   }, [commitKey]);
 
+  const addIntegration = useCallback((input: IntegrationInput): { ok: boolean; error?: string } => {
+    const normalized = normalizeIntegration(input);
+    if ("error" in normalized) return { ok: false, error: normalized.error };
+    const integration = normalized.integration;
+    const next = [
+      ...integrationsRef.current.filter(
+        (item) =>
+          !(item.origin === integration.origin && item.pathPrefix === integration.pathPrefix),
+      ),
+      integration,
+    ].slice(-40);
+    integrationsRef.current = next;
+    saveIntegrations(next);
+    setIntegrations(next);
+    return { ok: true };
+  }, []);
+
   const confirmHttp = useCallback(
-    (
-      req: { host: string; method: string; path: string; mutating: boolean },
-      signal: AbortSignal,
-    ) => {
-      if (!req.mutating && hostsRef.current.includes(req.host)) return Promise.resolve(true);
+    (req: HttpConfirm, signal: AbortSignal) => {
       return new Promise<boolean>((resolve, reject) => {
+        let settled = false;
         const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
           signal.removeEventListener("abort", onAbort);
           setPending(null);
           resolve(ok);
@@ -325,17 +360,35 @@ export function useEmber() {
           reject(new DOMException("Aborted", "AbortError"));
         };
         signal.addEventListener("abort", onAbort, { once: true });
+        const readOnly = !req.mutating;
+        const canIntegrate = readOnly && req.origin.startsWith("https:");
         setPending({
           host: req.host,
+          origin: req.origin,
           method: req.method,
           path: req.path,
           mutating: req.mutating,
-          allow: (always: boolean) => {
-            if (always && !req.mutating) {
-              const next = [...hostsRef.current, req.host].slice(-80);
-              hostsRef.current = next;
-              saveHosts(next);
-              setHosts(next);
+          bodyPreview: req.bodyPreview,
+          canSession: readOnly,
+          canIntegrate,
+          allowOnce: () => finish(true),
+          allowSession: () => {
+            if (readOnly) {
+              grantSessionAccess({
+                origin: req.origin,
+                pathPrefix: directoryPrefix(req.pathname),
+                methods: [req.method],
+              });
+            }
+            finish(true);
+          },
+          allowIntegrate: () => {
+            if (canIntegrate) {
+              addIntegration({
+                origin: req.origin,
+                pathPrefix: directoryPrefix(req.pathname),
+                methods: [req.method],
+              });
             }
             finish(true);
           },
@@ -343,7 +396,7 @@ export function useEmber() {
         });
       });
     },
-    [],
+    [addIntegration],
   );
 
   const playResponse = useCallback(async (res: Response, signal: AbortSignal) => {
@@ -586,6 +639,7 @@ export function useEmber() {
               key: keyRef.current,
               signal: ac.signal,
               confirmHttp: (req) => confirmHttp(req, ac.signal),
+              httpIntegrations: integrationsRef.current,
             });
             if (!still()) return;
             working = [
@@ -798,7 +852,7 @@ export function useEmber() {
       );
     },
     chats,
-    hosts,
+    integrations,
     favs,
     recentCharacters,
     keyMode,
@@ -833,11 +887,12 @@ export function useEmber() {
         return next;
       });
     },
-    forgetHost: (host: string) => {
-      const next = hostsRef.current.filter((item) => item !== host);
-      hostsRef.current = next;
-      saveHosts(next);
-      setHosts(next);
+    addIntegration,
+    removeIntegration: (id: string) => {
+      const next = integrationsRef.current.filter((item) => item.id !== id);
+      integrationsRef.current = next;
+      saveIntegrations(next);
+      setIntegrations(next);
     },
     startChat: () => {
       if (metaRef.current && metaRef.current.turns.length === 0) {

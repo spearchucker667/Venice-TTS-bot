@@ -1,7 +1,13 @@
-import type { Persona, ToolCall, Turn } from "@/state";
-import { TRAITS, resolveTextModel, systemContent } from "@/state";
-import { createSseParser } from "@/chat/sse";
-import { inspectUrl, packUntrusted } from "@/tools/policy";
+import type { Persona, ToolCall, Turn } from "./state.ts";
+import { TRAITS, resolveTextModel, systemContent } from "./state.ts";
+import { createSseParser } from "./chat/sse.ts";
+import { inspectUrl, packUntrusted } from "./tools/policy.ts";
+import {
+  decideHttpPermission,
+  listSessionGrants,
+  type HttpIntegration,
+} from "./tools/integrations.ts";
+import { contentLengthOverLimit, readBoundedBody } from "./tools/response-budget.ts";
 
 /** Inference only. Never call POST /api_keys — that route is admin-only. */
 
@@ -349,7 +355,7 @@ export async function modelVoices(
   }
 }
 
-export { resolveTextModel } from "@/state";
+export { resolveTextModel } from "./state.ts";
 
 export function modelSupportsTools(selection: string, discovery: Discovery | null): boolean {
   const id = resolveTextModel(selection, discovery?.traits ?? {});
@@ -780,15 +786,26 @@ export async function completeVoiceChange(
 
 export type HttpConfirm = {
   host: string;
+  /** Exact origin ("https://host") the permission scope is derived from. */
+  origin: string;
   method: string;
+  /** Pathname + search, for display. */
   path: string;
+  /** URL pathname only, for prefix matching. */
+  pathname: string;
   mutating: boolean;
+  /** Short preview of the data being sent (empty for bodyless requests). */
+  bodyPreview: string;
+  /** Full request-body size in bytes after the tool's own cap. */
+  bodyBytes: number;
 };
 
 export type ToolContext = {
   key: string;
   signal: AbortSignal;
   confirmHttp: (req: HttpConfirm) => Promise<boolean>;
+  /** User-defined external integrations; arbitrary model HTTP is off without a match. */
+  httpIntegrations?: readonly HttpIntegration[];
 };
 
 function parseArgs(raw: string): Record<string, unknown> {
@@ -907,14 +924,9 @@ async function httpRequest(args: Record<string, unknown>, ctx: ToolContext): Pro
   const checked = inspectUrl(String(args.url ?? ""));
   if ("error" in checked) return `Tool error: ${checked.error}`;
   const host = checked.url.hostname.toLowerCase();
+  const origin = checked.url.origin;
+  const pathname = checked.url.pathname;
   const mutating = WRITE_METHODS.has(method);
-  const ok = await ctx.confirmHttp({
-    host,
-    method,
-    path: `${checked.url.pathname}${checked.url.search}`.slice(0, 180),
-    mutating,
-  });
-  if (!ok) return `The user declined ${method} ${host}.`;
   const headers = new Headers();
   const rawHeaders =
     typeof args.headers === "string" ? parseArgs(args.headers) : asRecord(args.headers);
@@ -927,6 +939,28 @@ async function httpRequest(args: Record<string, unknown>, ctx: ToolContext): Pro
     }
   }
   const hasBody = mutating && typeof args.body === "string";
+  const bodyText = hasBody ? String(args.body).slice(0, 16_000) : "";
+  const decision = decideHttpPermission(ctx.httpIntegrations ?? [], listSessionGrants(), {
+    origin,
+    path: pathname,
+    method,
+    mutating,
+    bodyBytes: bodyText.length,
+  });
+  if (decision.outcome === "deny") return `Tool error: ${decision.reason}`;
+  if (decision.outcome === "confirm") {
+    const ok = await ctx.confirmHttp({
+      host,
+      origin,
+      method,
+      path: `${pathname}${checked.url.search}`.slice(0, 180),
+      pathname,
+      mutating,
+      bodyPreview: bodyText.slice(0, 240),
+      bodyBytes: bodyText.length,
+    });
+    if (!ok) return `The user declined ${method} ${host}.`;
+  }
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(), 20000);
   const onAbort = () => timeout.abort();
@@ -935,7 +969,7 @@ async function httpRequest(args: Record<string, unknown>, ctx: ToolContext): Pro
     const res = await fetch(checked.url.toString(), {
       method,
       headers,
-      body: hasBody ? String(args.body).slice(0, 16_000) : undefined,
+      body: hasBody ? bodyText : undefined,
       redirect: "manual",
       credentials: "omit",
       mode: "cors",
@@ -953,8 +987,20 @@ async function httpRequest(args: Record<string, unknown>, ctx: ToolContext): Pro
       }
       return "HTTP redirect was not followed.";
     }
-    const text = await res.text();
-    return packUntrusted("http_request", { status: res.status, method, host, body: text });
+    if (contentLengthOverLimit(res.headers)) {
+      await res.body?.cancel().catch(() => undefined);
+      return "Tool error: response body exceeds the 1 MiB tool limit.";
+    }
+    const read = await readBoundedBody(res.body);
+    if (!read.ok) return `Tool error: ${read.error}`;
+    return packUntrusted("http_request", {
+      status: res.status,
+      method,
+      host,
+      bytes: read.bytes,
+      truncated: read.truncated,
+      body: read.text,
+    });
   } catch (err) {
     if (ctx.signal.aborted) throw err;
     const message = err instanceof Error ? err.message : "network error";

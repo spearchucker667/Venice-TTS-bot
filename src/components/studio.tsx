@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { Menu, Mic, Send, Settings, Square, X } from "lucide-react";
 import { ChatMenu } from "@/components/chat-menu";
 import { Orb } from "@/components/orb";
@@ -1059,26 +1060,32 @@ export function Studio() {
               </div>
               <Switch
                 label="Tools"
-                hint="Search, read a page, or call an HTTP API. Reads can be remembered per host. Writes always ask. Private networks stay blocked."
+                hint="Search, read a page, or call an HTTP API. Model-driven HTTP runs only through integrations you define or session approvals. Writes always ask. Literal private and metadata addresses are blocked; a browser cannot verify where an arbitrary hostname resolves."
                 checked={ember.persona.tools}
                 onChange={(tools) => ember.patchPersona({ tools })}
               />
-              {ember.hosts.length ? (
+              {ember.integrations.length ? (
                 <div className="char-list">
-                  {ember.hosts.map((host) => (
+                  {ember.integrations.map((it) => (
                     <button
-                      key={host}
+                      key={it.id}
                       type="button"
                       className="chip"
-                      onClick={() => ember.forgetHost(host)}
+                      title={`${it.methods.join(", ")} ${it.origin}${it.pathPrefix || "/"} — click to remove`}
+                      onClick={() => ember.removeIntegration(it.id)}
                     >
-                      Forget {host}
+                      {it.methods.join("·")} {it.origin}
+                      {it.pathPrefix || ""}
                     </button>
                   ))}
                 </div>
               ) : (
-                <p className="hint">No hosts remembered.</p>
+                <p className="hint">
+                  No integrations. Add one below, or approve a request as &quot;this session&quot;
+                  when asked.
+                </p>
               )}
+              <IntegrationForm onAdd={(input) => ember.addIntegration(input)} />
             </section>
           ) : null}
 
@@ -1095,35 +1102,78 @@ export function Studio() {
         </div>
       </dialog>
 
-      {ember.pending ? (
-        <div className="confirm" role="alertdialog" aria-labelledby="confirm-title">
-          <h2 id="confirm-title">
-            {ember.pending.mutating ? "Allow this request?" : "Allow this host?"}
-          </h2>
-          <p>
-            {name} wants to {ember.pending.method} <strong>{ember.pending.host}</strong>
-            {ember.pending.path}. Private and metadata addresses stay blocked.
-            {ember.pending.mutating ? " This write is not remembered." : ""}
-          </p>
-          <div className="confirm-actions">
-            {ember.pending.mutating ? null : (
-              <button type="button" className="primary" onClick={() => ember.pending?.allow(true)}>
-                Always
-              </button>
-            )}
-            <button
-              type="button"
-              className={ember.pending.mutating ? "primary" : "ghost"}
-              onClick={() => ember.pending?.allow(false)}
-            >
-              Once
-            </button>
-            <button type="button" className="ghost" onClick={() => ember.pending?.deny()}>
-              Deny
-            </button>
-          </div>
-        </div>
-      ) : null}
+      <AlertDialog.Root
+        open={Boolean(ember.pending)}
+        onOpenChange={(open) => {
+          if (!open) ember.pending?.deny();
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 20,
+              background: "rgba(0, 0, 0, 0.55)",
+            }}
+          />
+          {ember.pending ? (
+            <AlertDialog.Content className="confirm" style={{ zIndex: 30 }}>
+              <AlertDialog.Title>
+                {ember.pending.mutating ? "Allow this write?" : "Allow this request?"}
+              </AlertDialog.Title>
+              <AlertDialog.Description>
+                {name} wants to send <strong>{ember.pending.method}</strong>{" "}
+                <strong>
+                  {ember.pending.origin}
+                  {ember.pending.path}
+                </strong>
+                {ember.pending.bodyPreview ? (
+                  <>
+                    {" "}
+                    with this data: <code>{ember.pending.bodyPreview}</code>
+                  </>
+                ) : null}
+                . Static private and metadata addresses are blocked, but a browser cannot verify
+                where an arbitrary hostname resolves. Durable access requires a scoped integration
+                (origin + path prefix + method); writes are never remembered.
+              </AlertDialog.Description>
+              <div className="confirm-actions">
+                {ember.pending.canIntegrate ? (
+                  <AlertDialog.Action
+                    type="button"
+                    className="primary"
+                    onClick={() => ember.pending?.allowIntegrate()}
+                  >
+                    Always (integration)
+                  </AlertDialog.Action>
+                ) : null}
+                {ember.pending.canSession ? (
+                  <AlertDialog.Action
+                    type="button"
+                    className="ghost"
+                    onClick={() => ember.pending?.allowSession()}
+                  >
+                    This session
+                  </AlertDialog.Action>
+                ) : null}
+                <AlertDialog.Action
+                  type="button"
+                  className={
+                    !ember.pending.canIntegrate && !ember.pending.canSession ? "primary" : "ghost"
+                  }
+                  onClick={() => ember.pending?.allowOnce()}
+                >
+                  Once
+                </AlertDialog.Action>
+                <AlertDialog.Cancel type="button" className="ghost">
+                  Deny
+                </AlertDialog.Cancel>
+              </div>
+            </AlertDialog.Content>
+          ) : null}
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </main>
   );
 }
@@ -1135,6 +1185,75 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint ? <span className="field-hint">{hint}</span> : null}
     </label>
+  );
+}
+
+function IntegrationForm({
+  onAdd,
+}: {
+  onAdd: (input: { origin: string; pathPrefix: string; methods: string[] }) => {
+    ok: boolean;
+    error?: string;
+  };
+}) {
+  const [origin, setOrigin] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [methods, setMethods] = useState("GET");
+  const [error, setError] = useState("");
+  const submit = () => {
+    const result = onAdd({
+      origin,
+      pathPrefix: prefix,
+      methods: methods
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean),
+    });
+    if (result.ok) {
+      setOrigin("");
+      setPrefix("");
+      setMethods("GET");
+      setError("");
+    } else {
+      setError(result.error ?? "Could not add the integration.");
+    }
+  };
+  return (
+    <div className="field">
+      <span className="field-label">Add integration</span>
+      <div className="key-row">
+        <input
+          aria-label="Integration origin"
+          placeholder="https://api.example.com"
+          value={origin}
+          onChange={(e) => setOrigin(e.target.value)}
+        />
+        <input
+          aria-label="Path prefix"
+          placeholder="/v1"
+          value={prefix}
+          onChange={(e) => setPrefix(e.target.value)}
+        />
+        <input
+          aria-label="Allowed methods"
+          placeholder="GET, HEAD"
+          value={methods}
+          onChange={(e) => setMethods(e.target.value)}
+        />
+        <button type="button" className="primary" onClick={submit}>
+          Add
+        </button>
+      </div>
+      <span className="field-hint">
+        Exact https origin, optional path prefix, and the methods the model may use there. Secrets
+        in headers are never part of an integration; the model cannot see or set them here.
+      </span>
+      {error ? (
+        <p role="alert" style={{ margin: "0.25rem 0 0", color: "var(--color-gold, inherit)" }}>
+          {error}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
