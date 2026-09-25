@@ -1,0 +1,7 @@
+name: Ember CodeQL
+paths-ignore:
+  - src/routeTree.gen.ts
+  - .vercel
+  - node_modules
+  - dist
+  - coverage

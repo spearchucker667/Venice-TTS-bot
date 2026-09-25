@@ -1,0 +1,51 @@
+name: Feature request
+description: A change to Ember's voice, chat, or Venice integration
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Small UI change
+        - Chat or history
+        - Voice or audio
+        - Venice catalog or characters
+        - Tools or security
+        - Documentation
+        - Other
+  - type: textarea
+    id: ux
+    attributes:
+      label: UX implications
+  - type: textarea
+    id: venice
+    attributes:
+      label: Venice API dependency
+      description: Name the endpoint or behavior if this needs something Venice does not already expose to this app.
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Security and privacy considerations
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

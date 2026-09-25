@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 520" role="img" aria-labelledby="title desc">
+  <title id="title">Ember data flow</title>
+  <desc id="desc">Text or microphone audio enters the browser. Speech is transcribed by Venice. The conversation is sent through the app proxy to Venice chat. The reply can be spoken with Venice text-to-speech. Voice changer is a separate path.</desc>
+  <style>
+    text { font-family: "Iowan Old Style", Georgia, serif; fill: #f4efe6; font-size: 16px; }
+    .small { font-family: "Avenir Next", system-ui, sans-serif; font-size: 13px; fill: #b3a394; }
+    .box { fill: #120e0c; stroke: #d4653a; stroke-width: 1.5; }
+    .line { stroke: #f0c15a; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect width="880" height="520" fill="#070605"/>
+  <rect class="box" x="40" y="40" width="180" height="64" rx="14"/>
+  <text x="130" y="78" text-anchor="middle">You</text>
+  <rect class="box" x="300" y="36" width="240" height="72" rx="14"/>
+  <text x="420" y="66" text-anchor="middle">Browser</text>
+  <text class="small" x="420" y="88" text-anchor="middle">chat, mic, playback, local storage</text>
+  <rect class="box" x="620" y="36" width="220" height="72" rx="14"/>
+  <text x="730" y="66" text-anchor="middle">App proxy</text>
+  <text class="small" x="730" y="88" text-anchor="middle">/api/venice allowlist</text>
+  <rect class="box" x="620" y="180" width="220" height="88" rx="14"/>
+  <text x="730" y="214" text-anchor="middle">Venice</text>
+  <text class="small" x="730" y="236" text-anchor="middle">chat, speech, characters</text>
+  <rect class="box" x="300" y="300" width="240" height="72" rx="14"/>
+  <text x="420" y="330" text-anchor="middle">Voice changer</text>
+  <text class="small" x="420" y="352" text-anchor="middle">quote, then queue once</text>
+  <rect class="box" x="40" y="300" width="180" height="72" rx="14"/>
+  <text x="130" y="342" text-anchor="middle">This device</text>
+  <text class="small" x="130" y="360" text-anchor="middle">IndexedDB and storage</text>
+  <path class="line" d="M220 72 H300"/>
+  <path class="line" d="M540 72 H620"/>
+  <path class="line" d="M730 108 V180"/>
+  <path class="line" d="M620 224 H540"/>
+  <path class="line" d="M420 108 V300"/>
+  <path class="line" d="M300 336 H220"/>
+</svg>

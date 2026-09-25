@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Ember",
+      "hasCanvas": false,
+      "bodyTextLen": 527,
+      "bodyTextHash": "57decd9c76130bcff683fc6161eb8d360ad6ef7e29239968a5e74cfbabf53750",
+      "bodyTextPrefix": "New chat Chats stay in this browser. Characters TTS studio Voice",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Ember",
+      "hasCanvas": false,
+      "bodyTextLen": 394,
+      "bodyTextHash": "7f928895ed693dad82fa7e5840da1efcb2905ce300e54b1bc1aa56c42b2f2b75",
+      "bodyTextPrefix": "PRIVATE VOICE Ember Here Flow Churn Core Drift EMBER · FLOW Brin",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

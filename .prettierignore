@@ -1,0 +1,11 @@
+node_modules
+dist
+.vercel
+.output
+coverage
+package-lock.json
+src/routeTree.gen.ts
+docs/assets
+screenshots
+artifacts
+.grok

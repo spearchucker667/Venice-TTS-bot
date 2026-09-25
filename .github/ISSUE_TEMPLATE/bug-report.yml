@@ -1,0 +1,106 @@
+name: Bug report
+description: A defect in Ember chat, voice, settings, or tools
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never include Venice API keys, bearer tokens, cookies, private prompts, private conversation content, or other credentials. Redact logs before pasting.
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      description: Tag, commit, or "unreleased working tree".
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: dropdown
+    id: form-factor
+    attributes:
+      label: Form factor
+      options:
+        - Desktop
+        - Mobile
+        - Both
+    validations:
+      required: true
+  - type: dropdown
+    id: context
+    attributes:
+      label: Where you are running it
+      options:
+        - Local clone
+        - Grok Build preview
+        - Vercel or other deployment
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Affected mode
+      multiple: true
+      options:
+        - Text chat
+        - Text to speech
+        - Speech to text
+        - Voice chat
+        - Voice changer
+        - Settings
+        - Characters
+        - Tools
+        - Other
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Browser console or network status only. Do not paste the API key.
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+      description: Optional. Do not include secrets in the frame.
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Is this a regression?
+      options:
+        - Yes
+        - No
+        - I don't know
+  - type: textarea
+    id: network
+    attributes:
+      label: Network, proxy, or ad-blocker notes
+      description: Optional.
