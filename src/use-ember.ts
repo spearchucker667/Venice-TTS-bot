@@ -68,6 +68,7 @@ import {
   type HttpConfirm,
   type VeniceCharacter,
 } from "@/venice";
+import { createVadTracker, isTypingOrInteractiveTarget } from "./vad.ts";
 
 type PendingHost = {
   host: string;
@@ -770,31 +771,25 @@ export function useEmber() {
           setRecording(true);
           setMood("listen", hands ? "Your turn" : "Hearing you");
           if (!hands) return;
-          let heard = false;
-          let loud = 0;
-          let quiet = 0;
-          const started = performance.now();
+          const tracker = createVadTracker({
+            threshold: personaRef.current.vad,
+            minSpeechMs: 180,
+            silenceMs: 900,
+            maxSpeechMs: 20000,
+            initialSilenceMs: 8000,
+          });
           window.clearInterval(vadRef.current);
           vadRef.current = window.setInterval(() => {
             if (!recordingRef.current) {
               window.clearInterval(vadRef.current);
               return;
             }
-            const level = audio.level();
-            if (level > personaRef.current.vad) {
-              loud += 50;
-              quiet = 0;
-              if (loud > 180) heard = true;
-            } else {
-              loud = 0;
-              if (heard) quiet += 50;
-            }
-            const elapsed = performance.now() - started;
-            if ((heard && quiet > 900) || elapsed > 20000 || (!heard && elapsed > 8000)) {
+            const state = tracker.step(audio.level());
+            if (state.shouldStop) {
               window.clearInterval(vadRef.current);
               void audio.stopMic().then((blob) => finishRecording(blob));
             }
-          }, 50);
+          }, 40);
         })
         .catch(() => {
           setError("Microphone permission is blocked.");
@@ -820,15 +815,14 @@ export function useEmber() {
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
       if (event.code !== "Space" || event.repeat) return;
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (isTypingOrInteractiveTarget(event.target)) return;
       event.preventDefault();
       if (!recordingRef.current) beginListen(false);
     };
     const up = (event: KeyboardEvent) => {
       if (event.code !== "Space") return;
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (isTypingOrInteractiveTarget(event.target)) return;
       listenGen.current += 1;
       event.preventDefault();
       const audio = audioRef.current;

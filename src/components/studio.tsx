@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { Menu, Mic, Send, Settings, Square, X } from "lucide-react";
 import { ChatMenu } from "@/components/chat-menu";
+import { MicCalibration } from "@/components/mic-calibration";
 import { Orb } from "@/components/orb";
 import { RichText } from "@/components/rich-text";
 import { VoiceChanger } from "@/components/voice-changer";
+import { classifyAppError } from "@/errors";
 import { presentText } from "@/speech";
 import {
   DEFAULT_PROMPT,
@@ -29,7 +31,16 @@ import {
 import { useEmber, voicesFor } from "@/use-ember";
 import { resolveTextModel, traitChoices, type Balance } from "@/venice";
 
-type SettingsTab = "connection" | "model" | "persona" | "voice" | "tools" | "changer";
+const SETTINGS_TABS = [
+  ["connection", "Key"],
+  ["model", "Model"],
+  ["persona", "Persona"],
+  ["voice", "Voice"],
+  ["tools", "Tools"],
+  ["changer", "Changer"],
+] as const;
+
+type SettingsTab = (typeof SETTINGS_TABS)[number][0];
 
 const SUGGESTIONS = [
   "What can you actually do?",
@@ -121,10 +132,19 @@ export function Studio() {
   const [studioText, setStudioText] = useState("Hello. This is a voice preview.");
   const [editAt, setEditAt] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [showNewResponse, setShowNewResponse] = useState(false);
+  const [charSlugDraft, setCharSlugDraft] = useState(ember.persona.characterSlug);
+  const [charSearchError, setCharSearchError] = useState<string | null>(null);
+  const [charSearched, setCharSearched] = useState(false);
+  const autoFollowRef = useRef(true);
   const threadRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const name = ember.persona.name.trim() || "Ember";
   const funds = money(ember.balance);
+
+  useEffect(() => {
+    setCharSlugDraft(ember.persona.characterSlug);
+  }, [ember.persona.characterSlug]);
 
   useEffect(() => {
     visual.lamp = ember.persona.lamp;
@@ -135,11 +155,36 @@ export function Studio() {
     );
   }, [ember.persona.lamp, ember.persona.flow]);
 
+  const handleThreadScroll = useCallback(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distanceToBottom < 80;
+    autoFollowRef.current = nearBottom;
+    if (nearBottom) {
+      setShowNewResponse(false);
+    }
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    autoFollowRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    setShowNewResponse(false);
+  }, []);
+
+  // UI-001: Auto-follow only when user is already near bottom; show pill otherwise
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [ember.turns, ember.partial, ember.hydrated]);
+    if (autoFollowRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setShowNewResponse(false);
+    } else if (ember.partial || ember.busy) {
+      setShowNewResponse(true);
+    }
+  }, [ember.turns, ember.partial, ember.hydrated, ember.busy]);
 
   useEffect(() => {
     const el = dialogRef.current;
@@ -220,6 +265,26 @@ export function Studio() {
       onToggleIncognito={ember.setIncognito}
     />
   );
+  const onTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex = -1;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % SETTINGS_TABS.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = SETTINGS_TABS.length - 1;
+    }
+    if (nextIndex >= 0) {
+      event.preventDefault();
+      const nextTab = SETTINGS_TABS[nextIndex]![0];
+      setTab(nextTab);
+      const tabEl = document.getElementById(`tab-${nextTab}`);
+      tabEl?.focus();
+    }
+  };
+
   let lastUser = -1;
   ember.turns.forEach((turn, index) => {
     if (turn.role === "user") lastUser = index;
@@ -248,7 +313,7 @@ export function Studio() {
       ) : null}
       <header className="topbar">
         <div className="brand">
-          <p className="brand-kicker">Private voice</p>
+          <p className="brand-kicker">Venice voice</p>
           <h1 className="brand-name">{name}</h1>
         </div>
         <div className="top-actions">
@@ -320,7 +385,12 @@ export function Studio() {
         </div>
       </section>
 
-      <section className="thread" ref={threadRef} aria-label="Conversation">
+      <section
+        className="thread"
+        ref={threadRef}
+        onScroll={handleThreadScroll}
+        aria-label="Conversation"
+      >
         {!ember.hasKey ? (
           <form
             className="keycard"
@@ -357,7 +427,7 @@ export function Studio() {
                 className="link"
                 href="https://docs.venice.ai/getting-started/quick-start"
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
               >
                 How keys work
               </a>
@@ -369,8 +439,8 @@ export function Studio() {
           <div className="empty">
             <h2>Speak, and it answers.</h2>
             <p>
-              Hold the mic or the space bar. {name} thinks in the open, talks back, and can search,
-              read a page, or call an API you allow.
+              Hold the mic or the space bar. {name} shows provider-exposed reasoning when available,
+              talks back, and can search, read a page, or call an API you allow.
             </p>
             <div className="chips">
               {SUGGESTIONS.map((prompt) => (
@@ -455,10 +525,85 @@ export function Studio() {
             <p>{ember.partial}</p>
           </article>
         ) : null}
+        {showNewResponse ? (
+          <button
+            type="button"
+            className="new-response-pill"
+            onClick={scrollToBottom}
+            aria-label="Scroll to newest response"
+            style={{
+              position: "sticky",
+              bottom: "1rem",
+              alignSelf: "center",
+              zIndex: 10,
+              padding: "0.45rem 1rem",
+              borderRadius: "9999px",
+              background: "var(--color-wax, #d4653a)",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+              boxShadow: "0 4px 14px rgba(0,0,0,0.35)",
+              fontSize: "0.85rem",
+              fontWeight: 600,
+            }}
+          >
+            New response ↓
+          </button>
+        ) : null}
       </section>
 
       <footer className="dock">
-        {ember.error ? <p className="error-line">{ember.error}</p> : null}
+        {ember.error
+          ? (() => {
+              const classified = classifyAppError(ember.error);
+              return (
+                <div
+                  className="error-banner"
+                  role="alert"
+                  style={{
+                    margin: "0.4rem 0",
+                    padding: "0.5rem 0.8rem",
+                    borderRadius: "0.5rem",
+                    background: "rgba(239, 68, 68, 0.15)",
+                    border: "1px solid rgba(239, 68, 68, 0.3)",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  <div>
+                    <p className="error-line" style={{ margin: 0, fontWeight: 500 }}>
+                      {classified.message}
+                    </p>
+                    <p
+                      className="hint"
+                      style={{ margin: "0.2rem 0 0", fontSize: "0.8rem", opacity: 0.85 }}
+                    >
+                      {classified.actionHint}
+                    </p>
+                  </div>
+                  {classified.kind === "auth" ? (
+                    <button
+                      type="button"
+                      className="chip"
+                      onClick={() => ember.setSettingsOpen(true)}
+                    >
+                      Settings
+                    </button>
+                  ) : classified.kind === "catalog_stale" ? (
+                    <button
+                      type="button"
+                      className="chip"
+                      onClick={() => ember.setSettingsOpen(true)}
+                    >
+                      Catalog
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })()
+          : null}
         {ember.hydrated && ember.discovery?.notice ? (
           <p className="hint">{ember.discovery.notice}</p>
         ) : null}
@@ -534,23 +679,18 @@ export function Studio() {
             <X className="icon" aria-hidden="true" />
           </button>
         </div>
-        <div className="tabs" role="tablist" aria-label="Settings">
-          {(
-            [
-              ["connection", "Key"],
-              ["model", "Model"],
-              ["persona", "Persona"],
-              ["voice", "Voice"],
-              ["tools", "Tools"],
-              ["changer", "Changer"],
-            ] as const
-          ).map(([id, label]) => (
+        <div className="tabs" role="tablist" aria-label="Settings sections">
+          {SETTINGS_TABS.map(([id, label], index) => (
             <button
               key={id}
+              id={`tab-${id}`}
               type="button"
               role="tab"
+              tabIndex={tab === id ? 0 : -1}
               aria-selected={tab === id}
+              aria-controls={`panel-${id}`}
               onClick={() => setTab(id)}
+              onKeyDown={(e) => onTabKeyDown(e, index)}
             >
               {label}
             </button>
@@ -558,7 +698,12 @@ export function Studio() {
         </div>
         <div className="sheet-body">
           {tab === "connection" ? (
-            <section className="group">
+            <section
+              role="tabpanel"
+              id="panel-connection"
+              aria-labelledby="tab-connection"
+              className="group"
+            >
               <h3>Connection</h3>
               <p className="hint">
                 {ember.tail ? `Key ending ${ember.tail}. ` : "No key saved. "}
@@ -629,7 +774,7 @@ export function Studio() {
           ) : null}
 
           {tab === "model" ? (
-            <section className="group">
+            <section role="tabpanel" id="panel-model" aria-labelledby="tab-model" className="group">
               <h3>Generation controls</h3>
               <p className="hint">
                 These change inference settings. They do not train or fine-tune the model.
@@ -783,7 +928,12 @@ export function Studio() {
           ) : null}
 
           {tab === "persona" ? (
-            <section className="group">
+            <section
+              role="tabpanel"
+              id="panel-persona"
+              aria-labelledby="tab-persona"
+              className="group"
+            >
               <h3>Persona</h3>
               <Field label="Spoken name">
                 <input
@@ -846,22 +996,49 @@ export function Studio() {
                 </span>
               </div>
               <Field label="Character slug">
-                <input
-                  suppressHydrationWarning
-                  value={ember.persona.characterSlug}
-                  maxLength={80}
-                  placeholder="optional"
-                  onChange={(event) => ember.chooseCharacter(event.target.value.trim())}
-                />
+                <div className="key-row">
+                  <input
+                    suppressHydrationWarning
+                    value={charSlugDraft}
+                    maxLength={80}
+                    placeholder="optional"
+                    onChange={(event) => setCharSlugDraft(event.target.value.trim())}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        ember.chooseCharacter(charSlugDraft);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => ember.chooseCharacter(charSlugDraft)}
+                  >
+                    Apply
+                  </button>
+                </div>
               </Field>
               <form
                 className="key-row"
                 onSubmit={(event) => {
                   event.preventDefault();
+                  setCharSearchError(null);
+                  setCharSearched(true);
                   void ember
                     .findCharacters(charQuery)
-                    .then(setCharHits)
-                    .catch(() => setCharHits([]));
+                    .then((hits) => {
+                      setCharHits(hits);
+                      setCharSearchError(null);
+                    })
+                    .catch((err) => {
+                      setCharHits([]);
+                      setCharSearchError(
+                        err instanceof Error
+                          ? err.message
+                          : "Could not load Venice characters — retry",
+                      );
+                    });
                 }}
               >
                 <input
@@ -875,6 +1052,45 @@ export function Studio() {
                   Search
                 </button>
               </form>
+              {charSearchError ? (
+                <div
+                  style={{
+                    margin: "0.4rem 0",
+                    color: "#f87171",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  <p className="hint" style={{ color: "inherit", margin: 0 }}>
+                    {charSearchError}
+                  </p>
+                  <button
+                    type="button"
+                    className="chip"
+                    onClick={() => {
+                      setCharSearchError(null);
+                      void ember
+                        .findCharacters(charQuery)
+                        .then(setCharHits)
+                        .catch((err) => {
+                          setCharHits([]);
+                          setCharSearchError(
+                            err instanceof Error
+                              ? err.message
+                              : "Could not load Venice characters — retry",
+                          );
+                        });
+                    }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : charSearched && charHits.length === 0 ? (
+                <p className="hint" style={{ margin: "0.4rem 0" }}>
+                  No matching characters found.
+                </p>
+              ) : null}
               <div className="char-list">
                 {ember.recentCharacters.map((slug) => (
                   <button
@@ -925,7 +1141,7 @@ export function Studio() {
           ) : null}
 
           {tab === "voice" ? (
-            <section className="group">
+            <section role="tabpanel" id="panel-voice" aria-labelledby="tab-voice" className="group">
               <h3>Voice</h3>
               <Field
                 label="Speech model"
@@ -1003,6 +1219,10 @@ export function Studio() {
                   ))}
                 </select>
               </Field>
+              <MicCalibration
+                currentVad={ember.persona.vad}
+                onApplyThreshold={(vad) => ember.patchPersona({ vad })}
+              />
               <Field label={`Hands-free sensitivity ${ember.persona.vad.toFixed(3)}`}>
                 <input
                   suppressHydrationWarning
@@ -1044,7 +1264,7 @@ export function Studio() {
           ) : null}
 
           {tab === "tools" ? (
-            <section className="group">
+            <section role="tabpanel" id="panel-tools" aria-labelledby="tab-tools" className="group">
               <h3>Tools</h3>
               <div className="field">
                 <span className="field-label">Web search</span>
@@ -1099,14 +1319,16 @@ export function Studio() {
           ) : null}
 
           {tab === "changer" ? (
-            <VoiceChanger
-              open
-              epoch={ember.epoch}
-              voices={voices}
-              defaultVoice={ember.persona.voice}
-              withKey={ember.withKey}
-              onPlay={async (blob) => ember.playArrayBuffer(await blob.arrayBuffer())}
-            />
+            <div role="tabpanel" id="panel-changer" aria-labelledby="tab-changer">
+              <VoiceChanger
+                open
+                epoch={ember.epoch}
+                voices={voices}
+                defaultVoice={ember.persona.voice}
+                withKey={ember.withKey}
+                onPlay={async (blob) => ember.playArrayBuffer(await blob.arrayBuffer())}
+              />
+            </div>
           ) : null}
         </div>
       </dialog>
