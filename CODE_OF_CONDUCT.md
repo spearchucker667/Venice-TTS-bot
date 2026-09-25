@@ -1,13 +1,19 @@
 # Code of conduct
 
-A full code of conduct is not in force yet.
+The project aims to provide a welcoming, respectful, and safe environment for all contributors and users.
 
-The Contributor Covenant (current 2.1 text) is the intended text, but it requires a real enforcement contact. This project has no maintainer email and no GitHub owner recorded in the workspace. Publishing the covenant with a made-up address would be worse than waiting.
+## Standards
 
-Until a contact exists:
+- Treat everyone with respect, patience, and empathy.
+- Harassment, discrimination, and derogatory language will not be tolerated in issues, pull requests, or discussions.
+- Do not publish or leak other people's private keys, tokens, prompt text, or audio recordings.
+- Maintain a focus on technical quality, constructive feedback, and privacy preservation.
 
-- Don't harass people in issues or pull requests.
-- Don't post other people's keys, prompts, or private audio.
-- Maintainers, once named, can close threads that do those things.
+## Enforcement
 
-The missing contact is a release blocker in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+To report unacceptable behavior or violations, please contact the maintainer:
+
+- GitHub: [@spearchucker667](https://github.com/spearchucker667)
+- Or open a confidential report through GitHub repository mechanisms.
+
+Maintainers have the right and responsibility to remove, edit, or reject comments, commits, code, issues, and other contributions that do not align with this Code of Conduct.

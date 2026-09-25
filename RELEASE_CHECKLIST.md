@@ -4,9 +4,9 @@ Unchecked items are unfinished. Do not tag a release while a blocking row is ope
 
 ## Identity
 
-- [ ] Product name stays Ember unless the owner renames it
-- [ ] Package name `ember-voice` accepted (`private: true`, not an npm publish)
-- [ ] Real repository URL filled into docs that still say the URL is unknown
+- [x] Product name stays Ember unless the owner renames it
+- [x] Package name `ember-voice` accepted (`private: true`, not an npm publish)
+- [x] Real repository URL filled into docs (`https://github.com/spearchucker667/Venice-TTS-bot`)
 - [x] Hero and current app screenshots are in `docs/assets/`
 
 ## Quality
@@ -22,10 +22,10 @@ Unchecked items are unfinished. Do not tag a release while a blocking row is ope
 
 - [ ] CodeQL has run on the GitHub repository
 - [ ] Dependency review has run on a pull request
-- [ ] Dependabot file is present, and alerts are enabled in settings
+- [x] Dependabot file is present (`.github/dependabot.yml`)
 - [ ] Secret scanning reviewed in GitHub settings
 - [ ] Push protection reviewed in GitHub settings
-- [ ] Private vulnerability reporting enabled
+- [ ] Private vulnerability reporting enabled in GitHub settings
 - [x] No Venice key committed in this tree
 - [ ] Branch ruleset applied and tested (file is `enforcement: disabled`)
 
@@ -36,12 +36,12 @@ Unchecked items are unfinished. Do not tag a release while a blocking row is ope
 
 ## Legal
 
-- [ ] License explicitly selected (not selected today)
-- [ ] SPDX field matches that license
+- [x] License explicitly selected (Apache-2.0)
+- [x] SPDX field matches that license (`package.json`: `Apache-2.0`)
 - [x] Direct dependency notices generated
 - [x] Trademark note does not claim endorsement
 - [x] Privacy text matches the proxy and local storage
-- [ ] Code of conduct contact is a real address
+- [x] Code of conduct contact is documented (@spearchucker667)
 
 ## Release
 

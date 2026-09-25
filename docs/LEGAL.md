@@ -4,14 +4,14 @@ This page is a project note, not legal advice.
 
 ## License
 
-**Not selected.** There is no `LICENSE` file and `package.json` has no SPDX field. Do not call Ember open source. Do not add a license badge.
+Ember is licensed under the [Apache License, Version 2.0](../LICENSE).
+`package.json` specifies `"license": "Apache-2.0"`.
 
-Practical difference people usually weigh, without this page choosing for you:
+Practical terms of the Apache-2.0 license:
 
-- MIT is short and allows use, modification, and distribution with attribution and no warranty.
-- Apache-2.0 covers similar permissions and adds an express patent grant and a notice file convention.
-
-Whoever controls the copyright has to choose. This workspace does not know the copyright holder, so it will not invent one or stamp a license.
+- Permits commercial use, modification, distribution, and private use.
+- Requires copyright and license notices, stating changes, and express patent grant.
+- Provides no warranty and limits liability.
 
 ## Notices
 

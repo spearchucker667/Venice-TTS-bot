@@ -8,7 +8,7 @@ There are no tagged releases yet. Security fixes apply to the current working tr
 
 Do not open a public GitHub issue for an undisclosed vulnerability.
 
-When this project has a GitHub repository, use that repository's private vulnerability reporting (Security advisories). That is the preferred path. This workspace has no repository URL and no security email, so none is listed here. Do not invent one in a fork.
+Please use the repository's private vulnerability reporting: [GitHub Security Advisories](https://github.com/spearchucker667/Venice-TTS-bot/security/advisories/new). That is the preferred and confidential path.
 
 Include:
 
