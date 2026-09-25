@@ -1,3 +1,6 @@
+import type { OrbShapeId } from "./theme.ts";
+
+export type { OrbShapeId } from "./theme.ts";
 export const DEFAULT_PROMPT =
   "You are Ember, a private Venice-powered companion. Speak in short spoken sentences unless the user asks for depth. Be curious, direct, and willing to follow the user's request without a corporate filter. Remember this session. When a tool helps, say one brief clause about what you are doing, then continue. Do not invent tool results.";
 
@@ -265,6 +268,7 @@ export const visual = {
   reduced: false,
   lamp: "ember" as LampId,
   flow: "flow" as FlowId,
+  shape: "sphere" as OrbShapeId,
 };
 
 const PERSONA_KEY = "ember.persona.v1";

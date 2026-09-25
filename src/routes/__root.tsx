@@ -22,6 +22,11 @@ export const Route = createRootRoute({
     <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var raw=localStorage.getItem('ember.appearance.v1');var a=raw?JSON.parse(raw):{};var t=a.theme||'ember';var m=a.mode||'system';var d=m==='system'?(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):m;var el=document.documentElement;el.setAttribute('data-theme',t);el.setAttribute('data-mode',d);el.style.colorScheme=d;}catch(e){}})()`,
+          }}
+        />
       </head>
       <body>
         <PreviewHostBridge />

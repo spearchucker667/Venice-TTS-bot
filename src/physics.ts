@@ -1,4 +1,5 @@
-import type { Mood } from "@/state";
+import type { Mood } from "./state.ts";
+import { SphereShape, type VesselShape } from "./shapes.ts";
 
 export const COUNT = 8;
 export const VESSEL = 0.74;
@@ -40,7 +41,13 @@ export function stepSim(
   motionScale = 1,
   buoyScale = 1,
   pull = 0,
+  vessel: VesselShape = SphereShape,
 ): void {
+  // ORB-007: If dt <= 0 (e.g. static/frozen reduced motion), do not advance sim time, heat, or positions
+  if (dt <= 0) {
+    return;
+  }
+
   const step = clamp(dt, 0.001, 0.033);
   const motion = (reduced ? 0.12 : 1) * motionScale;
   sim.time += step * (reduced ? 0.35 : 1) * (0.65 + motionScale * 0.35);
@@ -119,23 +126,28 @@ export function stepSim(
     }
   }
 
+  // Vessel boundary confinement using VesselShape
   for (let i = 0; i < COUNT; i++) {
     const o = i * 3;
-    const limit = Math.max(0.08, VESSEL - rad[i] * 0.55);
-    const len = Math.hypot(p[o], p[o + 1], p[o + 2]) || 1e-4;
-    if (len > limit) {
-      const s = limit / len;
-      p[o] *= s;
-      p[o + 1] *= s;
-      p[o + 2] *= s;
-      const nx = p[o] / limit;
-      const ny = p[o + 1] / limit;
-      const nz = p[o + 2] / limit;
-      const vn = v[o] * nx + v[o + 1] * ny + v[o + 2] * nz;
+    const margin = rad[i] * 0.55;
+    const current: [number, number, number] = [p[o] ?? 0, p[o + 1] ?? 0, p[o + 2] ?? 0];
+    const projected = vessel.projectInside(current, margin);
+    const moved =
+      Math.abs(current[0] - projected[0]) > 1e-5 ||
+      Math.abs(current[1] - projected[1]) > 1e-5 ||
+      Math.abs(current[2] - projected[2]) > 1e-5;
+
+    p[o] = projected[0];
+    p[o + 1] = projected[1];
+    p[o + 2] = projected[2];
+
+    if (moved) {
+      const n = vessel.normalAt([p[o] ?? 0, p[o + 1] ?? 0, p[o + 2] ?? 0]);
+      const vn = (v[o] ?? 0) * n[0] + (v[o + 1] ?? 0) * n[1] + (v[o + 2] ?? 0) * n[2];
       if (vn > 0) {
-        v[o] -= vn * nx;
-        v[o + 1] -= vn * ny;
-        v[o + 2] -= vn * nz;
+        v[o] = (v[o] ?? 0) - vn * n[0];
+        v[o + 1] = (v[o + 1] ?? 0) - vn * n[1];
+        v[o + 2] = (v[o + 2] ?? 0) - vn * n[2];
       }
     }
   }

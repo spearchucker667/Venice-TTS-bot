@@ -8,6 +8,7 @@ import { RichText } from "@/components/rich-text";
 import { VoiceChanger } from "@/components/voice-changer";
 import { classifyAppError } from "@/errors";
 import { presentText } from "@/speech";
+import { isTypingOrInteractiveTarget } from "@/vad";
 import {
   DEFAULT_PROMPT,
   FLOWS,
@@ -28,6 +29,16 @@ import {
   type ThinkingMode,
   type Turn,
 } from "@/state";
+import {
+  applyThemeToDom,
+  loadAppearance,
+  saveAppearance,
+  DEFAULT_APPEARANCE,
+  THEME_FAMILIES,
+  THEME_PREVIEWS,
+  ORB_SHAPES,
+  type AppearanceSettings,
+} from "@/theme";
 import { useEmber, voicesFor } from "@/use-ember";
 import { resolveTextModel, traitChoices, type Balance } from "@/venice";
 
@@ -37,6 +48,7 @@ const SETTINGS_TABS = [
   ["persona", "Persona"],
   ["voice", "Voice"],
   ["tools", "Tools"],
+  ["appearance", "Appearance"],
   ["changer", "Changer"],
 ] as const;
 
@@ -136,11 +148,71 @@ export function Studio() {
   const [charSlugDraft, setCharSlugDraft] = useState(ember.persona.characterSlug);
   const [charSearchError, setCharSearchError] = useState<string | null>(null);
   const [charSearched, setCharSearched] = useState(false);
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => loadAppearance());
   const autoFollowRef = useRef(true);
   const threadRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const name = ember.persona.name.trim() || "Ember";
   const funds = money(ember.balance);
+
+  useEffect(() => {
+    applyThemeToDom(appearance.theme, appearance.mode);
+    visual.shape = appearance.orbShape;
+    saveAppearance(appearance);
+  }, [appearance]);
+
+  const patchAppearance = useCallback((patch: Partial<AppearanceSettings>) => {
+    setAppearance((prev) => {
+      const next = { ...prev, ...patch };
+      saveAppearance(next);
+      return next;
+    });
+  }, []);
+
+  const openSettings = useCallback(
+    (next: SettingsTab) => {
+      setTab(next);
+      ember.setSettingsOpen(true);
+      setMenuOpen(false);
+    },
+    [ember],
+  );
+
+  // 22.11 Keyboard command surface
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (menuOpen) {
+          e.preventDefault();
+          setMenuOpen(false);
+        } else if (ember.settingsOpen) {
+          e.preventDefault();
+          ember.setSettingsOpen(false);
+        }
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && !isTypingOrInteractiveTarget(e.target)) {
+        const k = e.key.toLowerCase();
+        if (k === "k") {
+          e.preventDefault();
+          openSettings("appearance");
+        } else if (k === "n") {
+          e.preventDefault();
+          ember.startChat();
+        } else if (e.key === ",") {
+          e.preventDefault();
+          openSettings("connection");
+        } else if (e.shiftKey && k === "f") {
+          e.preventDefault();
+          setMenuOpen(true);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [menuOpen, ember, openSettings]);
 
   useEffect(() => {
     setCharSlugDraft(ember.persona.characterSlug);
@@ -228,11 +300,6 @@ export function Studio() {
   const modelRow = textModels.find((row) => row.id === resolvedModel);
   const compat =
     ember.discovery?.compat[ember.persona.ttsModel] ?? ember.discovery?.compat[resolvedModel] ?? [];
-  const openSettings = (next: SettingsTab) => {
-    setTab(next);
-    ember.setSettingsOpen(true);
-    setMenuOpen(false);
-  };
   const renderMenu = () => (
     <ChatMenu
       chats={ember.chats}
@@ -339,10 +406,10 @@ export function Studio() {
 
       <section className="orb-pane" aria-label="Companion">
         <div className="orb-stack">
-          <div className="orb-frame">
+          <div className="orb-frame" data-orb-shape={appearance.orbShape}>
             <div className="orb-shadow" />
             <div className="orb-fallback" aria-hidden="true" />
-            <Orb />
+            <Orb shape={appearance.orbShape} />
             <div className="status-block">
               <p className="status-line" aria-live="polite">
                 {ember.status}
@@ -1315,6 +1382,132 @@ export function Studio() {
                 </p>
               )}
               <IntegrationForm onAdd={(input) => ember.addIntegration(input)} />
+            </section>
+          ) : null}
+
+          {tab === "appearance" ? (
+            <section
+              role="tabpanel"
+              id="panel-appearance"
+              aria-labelledby="tab-appearance"
+              className="group"
+            >
+              <h3>Appearance</h3>
+              <div className="field">
+                <span className="field-label">Theme family</span>
+                <div
+                  className="char-list"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+                    gap: "0.5rem",
+                  }}
+                >
+                  {THEME_FAMILIES.map((fam) => {
+                    const isSelected = appearance.theme === fam.id;
+                    const preview = THEME_PREVIEWS[fam.id]?.dark;
+                    return (
+                      <button
+                        key={fam.id}
+                        type="button"
+                        className="chip"
+                        aria-pressed={isSelected}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          padding: "0.4rem 0.6rem",
+                          border: isSelected ? "2px solid var(--focus-ring)" : undefined,
+                        }}
+                        onClick={() => patchAppearance({ theme: fam.id })}
+                      >
+                        <span
+                          style={{
+                            width: "1rem",
+                            height: "1rem",
+                            borderRadius: "50%",
+                            background: preview?.accent ?? "#fff",
+                            border: "1px solid rgba(255,255,255,0.2)",
+                            display: "inline-block",
+                            flexShrink: 0,
+                          }}
+                        />
+                        <span>{fam.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">Mode</span>
+                <div className="seg" role="group" aria-label="Color mode">
+                  {(
+                    [
+                      ["system", "System"],
+                      ["dark", "Dark"],
+                      ["light", "Light"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={appearance.mode === value}
+                      onClick={() => patchAppearance({ mode: value })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">Vessel form</span>
+                <div className="seg wrap" role="group" aria-label="Orb shape">
+                  {ORB_SHAPES.map((shapeItem) => (
+                    <button
+                      key={shapeItem.id}
+                      type="button"
+                      aria-pressed={appearance.orbShape === shapeItem.id}
+                      onClick={() => patchAppearance({ orbShape: shapeItem.id })}
+                    >
+                      {shapeItem.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">Reduced motion</span>
+                <div className="seg" role="group" aria-label="Reduced motion">
+                  {(
+                    [
+                      ["system", "System"],
+                      ["on", "Freeze"],
+                      ["off", "Animate"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={appearance.reducedMotionOverride === value}
+                      onClick={() => patchAppearance({ reducedMotionOverride: value })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="confirm-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => patchAppearance(DEFAULT_APPEARANCE)}
+                >
+                  Reset appearance
+                </button>
+              </div>
             </section>
           ) : null}
 
