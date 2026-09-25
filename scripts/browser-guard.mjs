@@ -5,7 +5,8 @@
  * path from argv, so unchecked they will render `file:///root/.grok/auth.json`
  * into a PNG the agent can read, and write it anywhere.
  */
-import { resolve, sep } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -32,9 +33,17 @@ export function checkedUrl(url) {
 
 /** Absolute `target` if it is strictly inside `allowedDirs`, else exit 1. */
 export function checkedOutputPath(target, allowedDirs, label = "screenshot") {
+  // Map /workspace prefix to current directory if running in local non-container environment
+  let effectiveTarget = target;
+  if (!existsSync("/workspace") && (target === "/workspace" || target.startsWith("/workspace/"))) {
+    effectiveTarget = join(process.cwd(), target.slice("/workspace".length));
+  }
   // Resolve first so `..` cannot slip past the prefix check.
-  const abs = resolve(target);
-  const allowed = allowedDirs.some((dir) => abs.startsWith(dir.endsWith(sep) ? dir : dir + sep));
+  const abs = resolve(effectiveTarget);
+  const effectiveDirs = allowedDirs.map((dir) =>
+    dir === "/workspace" && !existsSync("/workspace") ? process.cwd() : dir,
+  );
+  const allowed = effectiveDirs.some((dir) => abs.startsWith(dir.endsWith(sep) ? dir : dir + sep));
   if (!allowed) {
     fail(`${label} path must be under ${allowedDirs.join(" or ")}, got ${abs}`);
   }
