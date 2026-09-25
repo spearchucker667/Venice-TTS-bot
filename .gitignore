@@ -13,3 +13,4 @@ test-results/
 .grok/preview.log
 artifacts/
 .tanstack/
+kimi-export-session_*.md

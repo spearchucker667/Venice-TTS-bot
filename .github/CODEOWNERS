@@ -1,13 +1,17 @@
-# No GitHub owner can be named yet: this workspace has no git remote.
-# Do not invent a username. Before enabling code-owner review, add lines for
-# a user or team that already has write access. Suggested paths:
-#
-# *                         <github-user-or-org/team>
-# /.github/                 <github-user-or-org/team>
-# /src/                     <github-user-or-org/team>
-# /scripts/                 <github-user-or-org/team>
-# /server/                  <github-user-or-org/team>
-# /SECURITY.md              <github-user-or-org/team>
-# /PRIVACY.md               <github-user-or-org/team>
-#
-# Until then, code-owner review stays off in .github/rules.json.
+# Code owners for Venice-TTS-bot
+# GitHub user @spearchucker667 owns the repository (verified via gh auth status).
+
+*                         @spearchucker667
+/.github/                 @spearchucker667
+/.github/workflows/       @spearchucker667
+/.github/CODEOWNERS       @spearchucker667
+/.github/rules.json       @spearchucker667
+/package.json             @spearchucker667
+/package-lock.json        @spearchucker667
+/vite.config.ts           @spearchucker667
+/vercel.json              @spearchucker667
+/src/                     @spearchucker667
+/scripts/                 @spearchucker667
+/server/                  @spearchucker667
+/SECURITY.md              @spearchucker667
+/PRIVACY.md               @spearchucker667

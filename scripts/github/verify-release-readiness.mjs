@@ -224,7 +224,9 @@ function localLinks(file) {
 function walkMd(dir) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (name === "node_modules" || name === ".vercel") continue;
+    if (name === "node_modules" || name === ".vercel" || name === "work orders") continue;
+    // Skip session-export artifacts (e.g. kimi-export-session_*.md)
+    if (/^kimi-export-session_/.test(name)) continue;
     const info = statSync(path);
     if (info.isDirectory()) walkMd(path);
     else if (name.endsWith(".md")) localLinks(path);

@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseChatExport, titleFromTurns } from "./chats.ts";
+import {
+  blankChat,
+  clearChats,
+  deleteChat,
+  listChats,
+  listChatsDetailed,
+  saveChat,
+  snapshotFromPersona,
+  titleFromTurns,
+  validateChatRecord,
+  validateTurn,
+  type ChatRecord,
+} from "./chats.ts";
 import { readySentences, spokenText } from "./speech.ts";
 import {
   PRESETS,
@@ -10,6 +22,130 @@ import {
   type Persona,
   DEFAULT_PERSONA,
 } from "./state.ts";
+
+type Listener = (() => void) | null;
+
+type MockRequest = {
+  onsuccess: Listener;
+  onerror: Listener;
+  result: unknown;
+  error: unknown;
+};
+
+/**
+ * In-memory IndexedDB mock. Store mutations run through a single FIFO
+ * pipeline, mirroring how IndexedDB serializes transactions that touch the
+ * same object store. `putDelayMs` simulates a slow in-flight write.
+ */
+function installMock(seed: Record<string, unknown> = {}, opts: { putDelayMs?: number } = {}) {
+  const data = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(seed)) data.set(key, structuredClone(value));
+  const putDelay = opts.putDelayMs ?? 0;
+  let pipeline: Promise<void> = Promise.resolve();
+  const enqueue = (op: () => void, delay = 0): Promise<void> => {
+    const run = pipeline.then(async () => {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      op();
+    });
+    pipeline = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+  const idb = {
+    open: (_name: string, _version: number) => {
+      const req: {
+        onupgradeneeded: Listener;
+        onsuccess: Listener;
+        onerror: Listener;
+        result: unknown;
+        error: unknown;
+      } = { onupgradeneeded: null, onsuccess: null, onerror: null, result: null, error: null };
+      const db = {
+        objectStoreNames: { contains: () => true },
+        createObjectStore: () => ({}),
+        close: () => undefined,
+        transaction: (_store: string, _mode: string) => {
+          let pendingReqs = 0;
+          let started = false;
+          let completed = false;
+          const completeIfDone = () => {
+            if (started && pendingReqs === 0 && !completed) {
+              completed = true;
+              void enqueue(() => tx.oncomplete?.()).catch(() => undefined);
+            }
+          };
+          queueMicrotask(() => {
+            started = true;
+            completeIfDone();
+          });
+          const txRequest = (apply: () => unknown, delay = 0): MockRequest => {
+            pendingReqs++;
+            const req: MockRequest = { onsuccess: null, onerror: null, result: null, error: null };
+            void enqueue(() => {
+              req.result = apply();
+              req.onsuccess?.();
+              pendingReqs--;
+              completeIfDone();
+            }, delay).catch(() => undefined);
+            return req;
+          };
+          const tx: {
+            oncomplete: Listener;
+            onerror: Listener;
+            onabort: Listener;
+            error: unknown;
+            objectStore: (name: string) => {
+              getAll: () => MockRequest;
+              put: (value: unknown) => MockRequest;
+              delete: (id: string) => MockRequest;
+              clear: () => MockRequest;
+            };
+          } = {
+            oncomplete: null,
+            onerror: null,
+            onabort: null,
+            error: null,
+            objectStore: () => ({
+              getAll: () =>
+                txRequest(() => Array.from(data.values()).map((row) => structuredClone(row))),
+              put: (value: unknown) =>
+                txRequest(() => {
+                  const row = value as { id?: unknown };
+                  if (row && typeof row.id === "string") data.set(row.id, structuredClone(row));
+                  return value;
+                }, putDelay),
+              delete: (id: string) =>
+                txRequest(() => {
+                  data.delete(id);
+                  return undefined;
+                }),
+              clear: () =>
+                txRequest(() => {
+                  data.clear();
+                  return undefined;
+                }),
+            }),
+          };
+          return tx;
+        },
+      };
+      req.result = db;
+      setTimeout(() => req.onsuccess?.(), 0);
+      return req;
+    },
+  };
+  const globals = globalThis as typeof globalThis & { indexedDB?: IDBFactory };
+  globals.indexedDB = idb as unknown as IDBFactory;
+  return {
+    dump: () => {
+      const out: Record<string, unknown> = {};
+      for (const [key, value] of data) out[key] = structuredClone(value);
+      return out;
+    },
+  };
+}
 
 test("titles come from the first user line", () => {
   assert.equal(
@@ -61,14 +197,118 @@ test("speech keeps the tail instead of dropping it", () => {
   assert.equal(split.ready.length, 0);
 });
 
-test("chat export ignores junk and keeps titles", () => {
-  const rows = parseChatExport({
-    chats: [
-      { title: "Kept", turns: [{ role: "user", content: "Hi" }], id: "chat-12345678" },
-      { nope: true },
-    ],
-  });
+// --- CHAT-002: serialized persistence, no resurrection races ---
+
+test("clear-all wins over an in-flight save", async () => {
+  const { dump } = installMock({}, { putDelayMs: 20 });
+  const chat = blankChat();
+  const saving = saveChat(chat);
+  const clearing = clearChats();
+  await Promise.all([saving, clearing]);
+  assert.deepEqual(await listChats(), []);
+  assert.deepEqual(Object.keys(dump()), []);
+});
+
+test("delete wins over an in-flight save of the same chat", async () => {
+  installMock({}, { putDelayMs: 20 });
+  const chat = blankChat();
+  const saving = saveChat(chat);
+  const removing = deleteChat(chat.id);
+  await Promise.all([saving, removing]);
+  assert.deepEqual(await listChats(), []);
+});
+
+test("a save queued after a delete still persists (undo restore)", async () => {
+  installMock({});
+  const chat = blankChat();
+  await saveChat(chat);
+  await deleteChat(chat.id);
+  await saveChat(chat);
+  const rows = await listChats();
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.title, "Kept");
-  assert.equal(rows[0]?.turns[0]?.content, "Hi");
+  assert.equal(rows[0]?.id, chat.id);
+});
+
+test("saves commit in queue order", async () => {
+  installMock({});
+  const first = blankChat();
+  const second = blankChat();
+  await saveChat(first);
+  await saveChat(second);
+  const rows = await listChats();
+  assert.deepEqual(rows.map((row) => row.id).sort(), [first.id, second.id].sort());
+});
+
+// --- CHAT-005: runtime row validation with quarantine ---
+
+test("listChats quarantines malformed rows without throwing", async () => {
+  const valid: ChatRecord = {
+    id: "chat-valid0001",
+    title: "Good chat",
+    updatedAt: 1000,
+    pinned: false,
+    turns: [{ role: "user", content: "hi" }],
+  };
+  const mixed: ChatRecord = {
+    id: "chat-mixed0002",
+    title: "Mixed",
+    updatedAt: 2000,
+    pinned: false,
+    turns: [{ role: "user", content: "keep me" }],
+  };
+  installMock({
+    [valid.id]: valid,
+    [mixed.id]: { ...mixed, turns: [...mixed.turns, { role: "alien", content: "x" }] },
+    "short-id": { title: "no id", turns: [] },
+    "chat-junk0003": { title: "turns not array", turns: "nope" },
+  });
+  const report = await listChatsDetailed();
+  assert.equal(report.quarantined, 2);
+  assert.deepEqual(report.chats.map((row) => row.id).sort(), [valid.id, mixed.id].sort());
+  const mixedRow = report.chats.find((row) => row.id === mixed.id);
+  assert.equal(mixedRow?.turns.length, 1);
+  assert.equal(mixedRow?.turns[0]?.content, "keep me");
+});
+
+test("validateTurn caps oversized content and keeps assistant metadata", () => {
+  const huge = validateTurn({ role: "user", content: "x".repeat(25000) });
+  assert.equal(huge?.role, "user");
+  assert.equal(huge?.content.length, 20000);
+  const assistant = validateTurn({
+    role: "assistant",
+    content: "answer",
+    thinking: "hmm",
+    citations: [{ title: "T", url: "https://x" }],
+    tool_calls: [{ id: "call_1", name: "venice_web_search", arguments: "{}" }],
+  });
+  assert.equal(assistant?.role, "assistant");
+  if (assistant?.role === "assistant") {
+    assert.equal(assistant.thinking, "hmm");
+    assert.equal(assistant.citations?.length, 1);
+    assert.equal(assistant.tool_calls?.[0]?.id, "call_1");
+  }
+});
+
+// --- CHAT-010: per-conversation settings snapshot ---
+
+test("blankChat stamps an optional settings snapshot", () => {
+  const snapshot = snapshotFromPersona(DEFAULT_PERSONA, "rev42");
+  assert.equal(snapshot.textModel, DEFAULT_PERSONA.textModel);
+  assert.equal(snapshot.promptMode, DEFAULT_PERSONA.promptMode);
+  assert.equal(snapshot.webSearch, DEFAULT_PERSONA.webSearch);
+  assert.equal(snapshot.tools, DEFAULT_PERSONA.tools);
+  assert.equal(snapshot.createdWithCatalogRevision, "rev42");
+  const chat = blankChat(snapshot);
+  assert.deepEqual(chat.settings, snapshot);
+  const bare = blankChat();
+  assert.equal(bare.settings, undefined);
+});
+
+test("validateChatRecord keeps valid snapshots and drops malformed ones", () => {
+  const snapshot = snapshotFromPersona(DEFAULT_PERSONA);
+  const chat = { ...blankChat(), turns: [{ role: "user", content: "hello" }], settings: snapshot };
+  const parsed = validateChatRecord(chat);
+  assert.deepEqual(parsed?.settings, snapshot);
+  const broken = validateChatRecord({ ...chat, settings: { textModel: 5, junk: true } });
+  assert.equal(broken?.settings, undefined);
 });

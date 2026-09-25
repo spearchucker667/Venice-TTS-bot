@@ -5,12 +5,13 @@ import {
   clearChats,
   deleteChat,
   listChats,
-  parseChatExport,
   saveChat,
+  snapshotFromPersona,
   sortChats,
   titleFromTurns,
   type ChatRecord,
 } from "@/chats";
+import { buildChatExport, parseChatImport, type ChatImportResult } from "@/chat-export";
 import { localCommand, presentText, readySentences, slashCommand, spokenText } from "@/speech";
 import {
   contextWindow,
@@ -117,6 +118,9 @@ export function useEmber() {
   const [pending, setPending] = useState<PendingHost | null>(null);
   const [busy, setBusy] = useState(false);
   const [chats, setChats] = useState<ChatRecord[]>([]);
+  const [incognito, setIncognitoState] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [deleteToast, setDeleteToast] = useState<{ id: string; title: string } | null>(null);
   const [integrations, setIntegrations] = useState<HttpIntegration[]>([]);
   const [favs, setFavs] = useState<string[]>([]);
   const [recentCharacters, setRecentCharacters] = useState<string[]>([]);
@@ -124,6 +128,8 @@ export function useEmber() {
   const [epoch, setEpoch] = useState(0);
   const metaRef = useRef<ChatRecord | null>(null);
   const chatsRef = useRef<ChatRecord[]>([]);
+  const incognitoRef = useRef(false);
+  const trashRef = useRef<{ chat: ChatRecord; timer: number } | null>(null);
 
   const personaRef = useRef(persona);
   const turnsRef = useRef(turns);
@@ -179,25 +185,49 @@ export function useEmber() {
     }
   }, []);
 
-  const remember = useCallback((turns: Turn[]) => {
-    saveMessages(turns);
-    const current = metaRef.current;
-    if (!current) return;
-    const next: ChatRecord = {
-      ...current,
-      turns,
-      title: current.title === "New chat" ? titleFromTurns(turns) : current.title,
-      updatedAt: Date.now(),
-    };
-    metaRef.current = next;
-    setChats((prev) => {
-      const rows = prev.some((row) => row.id === next.id)
-        ? prev.map((row) => (row.id === next.id ? next : row))
-        : [next, ...prev];
-      return sortChats(rows);
-    });
-    void saveChat(next).catch(() => undefined);
+  /** CHAT-011: incognito mode pauses every history persistence write. */
+  const persistChat = useCallback((chat: ChatRecord) => {
+    if (incognitoRef.current) return;
+    void saveChat(chat).catch(() => undefined);
   }, []);
+
+  const setIncognito = useCallback((value: boolean) => {
+    incognitoRef.current = value;
+    setIncognitoState(value);
+    setNotice(
+      value
+        ? "Incognito is on. Nothing new is written to chat history; turns stay in memory."
+        : "Incognito is off. Chats save to this browser again.",
+    );
+  }, []);
+
+  const catalogRevision = () => {
+    const fetchedAt = discoveryRef.current?.fetchedAt;
+    return fetchedAt ? String(fetchedAt) : undefined;
+  };
+
+  const remember = useCallback(
+    (turns: Turn[]) => {
+      if (!incognitoRef.current) saveMessages(turns);
+      const current = metaRef.current;
+      if (!current) return;
+      const next: ChatRecord = {
+        ...current,
+        turns,
+        title: current.title === "New chat" ? titleFromTurns(turns) : current.title,
+        updatedAt: Date.now(),
+      };
+      metaRef.current = next;
+      setChats((prev) => {
+        const rows = prev.some((row) => row.id === next.id)
+          ? prev.map((row) => (row.id === next.id ? next : row))
+          : [next, ...prev];
+        return sortChats(rows);
+      });
+      persistChat(next);
+    },
+    [persistChat],
+  );
 
   useEffect(() => {
     const key = loadKey();
@@ -290,9 +320,9 @@ export function useEmber() {
     metaRef.current = next;
     setChats((prev) => sortChats(prev.map((row) => (row.id === next.id ? next : row))));
     saveMessages([]);
-    void saveChat(next).catch(() => undefined);
+    persistChat(next);
     setMood("idle", "Cleared");
-  }, [setMood, stopAll]);
+  }, [persistChat, setMood, stopAll]);
 
   const patchPersona = useCallback((partialPersona: Partial<Persona>) => {
     setPersona((prev) => {
@@ -852,6 +882,11 @@ export function useEmber() {
       );
     },
     chats,
+    incognito,
+    setIncognito,
+    notice,
+    clearNotice: () => setNotice(""),
+    deleteToast,
     integrations,
     favs,
     recentCharacters,
@@ -901,13 +936,13 @@ export function useEmber() {
         return;
       }
       stopAll();
-      const chat = blankChat();
+      const chat = blankChat(snapshotFromPersona(personaRef.current, catalogRevision()));
       metaRef.current = chat;
       turnsRef.current = [];
       setTurns([]);
       saveMessages([]);
       setChats((prev) => sortChats([chat, ...prev]));
-      void saveChat(chat).catch(() => undefined);
+      persistChat(chat);
       setError("");
     },
     openChat: (id: string) => {
@@ -918,6 +953,20 @@ export function useEmber() {
       turnsRef.current = row.turns;
       setTurns(row.turns);
       saveMessages(row.turns);
+      if (row.settings) {
+        const snapshot = row.settings;
+        patchPersona({
+          textModel: snapshot.textModel,
+          systemPrompt: snapshot.systemPrompt,
+          promptMode: snapshot.promptMode,
+          characterSlug: snapshot.characterSlug,
+          temperature: snapshot.temperature,
+          topP: snapshot.topP,
+          maxTokens: snapshot.maxTokens,
+          webSearch: snapshot.webSearch,
+          tools: snapshot.tools,
+        });
+      }
       setError("");
     },
     renameChat: (id: string, title: string) => {
@@ -928,7 +977,7 @@ export function useEmber() {
             if (row.id !== id) return row;
             const next = { ...row, title: clean };
             if (metaRef.current?.id === id) metaRef.current = { ...metaRef.current, title: clean };
-            void saveChat(next).catch(() => undefined);
+            persistChat(next);
             return next;
           }),
         ),
@@ -942,7 +991,7 @@ export function useEmber() {
             const updated = { ...row, pinned: !row.pinned };
             if (metaRef.current?.id === id)
               metaRef.current = { ...metaRef.current, pinned: updated.pinned };
-            void saveChat(updated).catch(() => undefined);
+            persistChat(updated);
             return updated;
           }),
         );
@@ -950,34 +999,72 @@ export function useEmber() {
       });
     },
     removeChat: (id: string) => {
-      void deleteChat(id).catch(() => undefined);
-      const remaining = chatsRef.current.filter((row) => row.id !== id);
+      const row = chatsRef.current.find((chat) => chat.id === id);
+      if (!row) return;
+      const previous = trashRef.current;
+      if (previous) {
+        window.clearTimeout(previous.timer);
+        trashRef.current = null;
+        void deleteChat(previous.chat.id).catch(() => undefined);
+      }
+      const remaining = chatsRef.current.filter((chat) => chat.id !== id);
       if (metaRef.current?.id === id) {
         stopAll();
-        const fallback = remaining[0] ?? blankChat();
+        const fallback =
+          remaining[0] ?? blankChat(snapshotFromPersona(personaRef.current, catalogRevision()));
         if (!remaining.length) remaining.unshift(fallback);
         metaRef.current = fallback;
         turnsRef.current = fallback.turns;
         setTurns(fallback.turns);
         saveMessages(fallback.turns);
-        if (!chatsRef.current.some((row) => row.id === fallback.id))
-          void saveChat(fallback).catch(() => undefined);
+        if (!chatsRef.current.some((chat) => chat.id === fallback.id)) persistChat(fallback);
       }
       setChats(sortChats(remaining));
+      setDeleteToast({ id: row.id, title: row.title });
+      const deleted = row;
+      trashRef.current = {
+        chat: deleted,
+        timer: window.setTimeout(() => {
+          trashRef.current = null;
+          setDeleteToast(null);
+          void deleteChat(deleted.id).catch(() => undefined);
+        }, 8000),
+      };
+    },
+    undoDelete: () => {
+      const pending = trashRef.current;
+      if (!pending) return;
+      window.clearTimeout(pending.timer);
+      trashRef.current = null;
+      setDeleteToast(null);
+      persistChat(pending.chat);
+      setChats((prev) =>
+        sortChats(prev.some((row) => row.id === pending.chat.id) ? prev : [pending.chat, ...prev]),
+      );
+      setNotice(`Restored “${pending.chat.title}”.`);
+    },
+    dismissDeleteToast: () => {
+      const pending = trashRef.current;
+      if (pending) {
+        window.clearTimeout(pending.timer);
+        trashRef.current = null;
+        void deleteChat(pending.chat.id).catch(() => undefined);
+      }
+      setDeleteToast(null);
     },
     clearAllChats: () => {
       stopAll();
-      void clearChats().catch(() => undefined);
-      const chat = blankChat();
+      if (!incognitoRef.current) void clearChats().catch(() => undefined);
+      const chat = blankChat(snapshotFromPersona(personaRef.current, catalogRevision()));
       metaRef.current = chat;
       turnsRef.current = [];
       setTurns([]);
       saveMessages([]);
       setChats([chat]);
-      void saveChat(chat).catch(() => undefined);
+      persistChat(chat);
     },
     exportChats: () => {
-      const blob = new Blob([JSON.stringify({ version: 1, chats: chatsRef.current }, null, 2)], {
+      const blob = new Blob([JSON.stringify(buildChatExport(chatsRef.current), null, 2)], {
         type: "application/json",
       });
       const url = URL.createObjectURL(blob);
@@ -987,20 +1074,60 @@ export function useEmber() {
       link.click();
       URL.revokeObjectURL(url);
     },
+    exportChat: (id: string) => {
+      const chat = chatsRef.current.find((row) => row.id === id);
+      if (!chat) return;
+      const blob = new Blob([JSON.stringify(buildChatExport([chat]), null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const slug =
+        chat.title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 32) || "chat";
+      link.download = `ember-chat-${slug}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    },
+    applyDefaultsToChat: (id: string) => {
+      const settings = snapshotFromPersona(personaRef.current, catalogRevision());
+      setChats((prev) =>
+        sortChats(
+          prev.map((row) => {
+            if (row.id !== id) return row;
+            const next = { ...row, settings };
+            if (metaRef.current?.id === id) metaRef.current = next;
+            persistChat(next);
+            return next;
+          }),
+        ),
+      );
+      setNotice("Current defaults saved to that conversation.");
+    },
     importChats: async (file: File) => {
-      let parsed: ChatRecord[] = [];
+      let result: ChatImportResult;
       try {
-        parsed = parseChatExport(JSON.parse(await file.text()));
-      } catch {
-        setError("That file is not an Ember chat export.");
+        const json: unknown = JSON.parse(await file.text());
+        result = parseChatImport(json, new Set(chatsRef.current.map((chat) => chat.id)));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "That file is not an Ember chat export.");
         return;
       }
-      if (!parsed.length) {
+      if (!result.chats.length) {
         setError("No chats found in that file.");
         return;
       }
-      for (const row of parsed) await saveChat(row).catch(() => undefined);
-      const rows = await listChats().catch(() => sortChats(parsed));
+      if (incognitoRef.current) {
+        setChats((prev) => sortChats([...prev, ...result.chats]));
+        setNotice("Incognito is on: imported chats are in memory only and were not saved.");
+        return;
+      }
+      for (const row of result.chats) await saveChat(row).catch(() => undefined);
+      const rows = await listChats().catch(() => sortChats(result.chats));
       setChats(rows);
       const current = rows[0];
       if (current) {
@@ -1009,6 +1136,30 @@ export function useEmber() {
         setTurns(current.turns);
         saveMessages(current.turns);
       }
+      const summary = result.summary;
+      const parts = [`Imported ${summary.imported} ${summary.imported === 1 ? "chat" : "chats"}`];
+      if (summary.idConflicts)
+        parts.push(
+          `${summary.idConflicts} duplicate ${summary.idConflicts === 1 ? "ID" : "IDs"} given new IDs`,
+        );
+      if (summary.archivedTransactions)
+        parts.push(
+          `${summary.archivedTransactions} incomplete tool ${
+            summary.archivedTransactions === 1 ? "call" : "calls"
+          } archived as text`,
+        );
+      if (summary.droppedOrphanTools)
+        parts.push(
+          `${summary.droppedOrphanTools} orphan tool ${
+            summary.droppedOrphanTools === 1 ? "result" : "results"
+          } removed`,
+        );
+      if (summary.droppedTurns)
+        parts.push(
+          `${summary.droppedTurns} invalid ${summary.droppedTurns === 1 ? "turn" : "turns"} skipped`,
+        );
+      if (summary.truncated) parts.push("file trimmed to import limits");
+      setNotice(`${parts.join("; ")}.`);
     },
     replaceFrom: (index: number, text: string) => {
       const prior = turnsRef.current.slice(0, index);

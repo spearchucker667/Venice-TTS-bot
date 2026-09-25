@@ -1,5 +1,17 @@
 import type { Persona, ToolCall, Turn } from "./state.ts";
 import { TRAITS, resolveTextModel, systemContent } from "./state.ts";
+import type { CompatibilityMap, ModelCapabilities } from "./catalog-types.ts";
+import {
+  compatArraysFromMap,
+  compatMapFromArrays,
+  inputRate,
+  normalizeCapabilities,
+  normalizeFinishReason,
+  outputRate,
+  parseCompatibilityMap,
+  priceLabelFromRates,
+  resolveReasoningEffort,
+} from "./catalog-normalize.ts";
 import { createSseParser } from "./chat/sse.ts";
 import { inspectUrl, packUntrusted } from "./tools/policy.ts";
 import {
@@ -87,6 +99,8 @@ export type ModelRow = {
   contextTokens: number | null;
   privacy: string;
   price: string;
+  /** VEN-003: full normalized capability descriptor; null when not reported. */
+  capabilities: ModelCapabilities | null;
 };
 
 export type VeniceCharacter = {
@@ -102,8 +116,17 @@ export type Discovery = {
   traits: Record<string, string>;
   voices: Record<string, string[]>;
   characters: VeniceCharacter[];
+  /** Display form of the compatibility mapping (alias → compatible ids). */
   compat: Record<string, string[]>;
+  /** VEN-001: canonical alias/provider name → canonical model ID mapping. */
+  compatMap: CompatibilityMap;
   fetchedAt: number;
+  /** VEN-002: cache schema version (CATALOG_SCHEMA_VERSION). */
+  schemaVersion: number;
+  /** VEN-002: provider revision marker when the response exposed one. */
+  etag: string | null;
+  /** True for restored caches — live discovery has not confirmed this data. */
+  stale: boolean;
   notice: string;
 };
 
@@ -130,10 +153,9 @@ function privacyLabel(spec: Record<string, unknown> | null, row: Record<string, 
 function priceLabel(spec: Record<string, unknown> | null): string {
   const pricing = asRecord(spec?.pricing);
   if (!pricing) return "";
-  const input = pricing.input ?? pricing.prompt;
-  const output = pricing.output ?? pricing.completion;
-  if (typeof input !== "number" && typeof output !== "number") return "";
-  return `in ${typeof input === "number" ? input : "?"} / out ${typeof output === "number" ? output : "?"}`;
+  // VEN-007: units always come along — "$X / 1M input tokens", or the unit the
+  // catalog metadata specifies; unlabeled non-per-token rates are hidden.
+  return priceLabelFromRates(inputRate(pricing), outputRate(pricing));
 }
 
 function contextTokens(
@@ -166,6 +188,7 @@ function parseModels(json: unknown): ModelRow[] {
       contextTokens: contextTokens(spec, row),
       privacy: privacyLabel(spec, row),
       price: priceLabel(spec),
+      capabilities: normalizeCapabilities(spec, row),
     });
   }
   return rows;
@@ -202,23 +225,6 @@ function voicesFromSpec(spec: Record<string, unknown> | null): string[] {
   return [];
 }
 
-function parseCompat(json: unknown): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
-  const visit = (node: unknown) => {
-    const rec = asRecord(node);
-    if (!rec) return;
-    for (const [key, value] of Object.entries(rec)) {
-      if (key === "object" || key === "type") continue;
-      if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
-        out[key] = (value as string[]).slice(0, 12);
-      } else if (asRecord(value)) visit(value);
-    }
-  };
-  const root = asRecord(json);
-  visit(asRecord(root?.data) ?? root);
-  return out;
-}
-
 function normalizeRow(row: ModelRow): ModelRow {
   return {
     id: row.id,
@@ -228,6 +234,7 @@ function normalizeRow(row: ModelRow): ModelRow {
     contextTokens: row.contextTokens ?? null,
     privacy: row.privacy ?? "",
     price: row.price ?? "",
+    capabilities: row.capabilities ?? null,
   };
 }
 
@@ -247,6 +254,7 @@ function parseCharacters(json: unknown): VeniceCharacter[] {
   return rows;
 }
 
+export const CATALOG_SCHEMA_VERSION = 2;
 const CATALOG_KEY = "ember.catalog.v1";
 
 export function loadCatalog(): Discovery | null {
@@ -255,6 +263,12 @@ export function loadCatalog(): Discovery | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Discovery;
     if (!parsed || !Array.isArray(parsed.text)) return null;
+    // VEN-002: v1 caches predate compatMap/schemaVersion — derive the
+    // canonical map from the legacy display arrays (first entry wins).
+    const compatMap: CompatibilityMap =
+      parsed.compatMap && typeof parsed.compatMap === "object"
+        ? parsed.compatMap
+        : compatMapFromArrays(parsed.compat);
     return {
       text: (parsed.text ?? []).map(normalizeRow),
       tts: (parsed.tts ?? []).map(normalizeRow),
@@ -262,9 +276,14 @@ export function loadCatalog(): Discovery | null {
       traits: parsed.traits ?? {},
       voices: parsed.voices ?? {},
       characters: parsed.characters ?? [],
-      compat: parsed.compat ?? {},
+      compat: parsed.compat ?? compatArraysFromMap(compatMap),
+      compatMap,
       fetchedAt: parsed.fetchedAt ?? 0,
-      notice: "Showing the last catalog saved in this browser.",
+      schemaVersion: typeof parsed.schemaVersion === "number" ? parsed.schemaVersion : 1,
+      etag: typeof parsed.etag === "string" ? parsed.etag : null,
+      stale: true,
+      notice:
+        "Showing the last catalog saved in this browser. Catalog is offline until the next refresh.",
     };
   } catch {
     return null;
@@ -273,18 +292,27 @@ export function loadCatalog(): Discovery | null {
 
 export function saveCatalog(found: Discovery): void {
   try {
-    localStorage.setItem(CATALOG_KEY, JSON.stringify({ ...found, voices: found.voices }));
+    localStorage.setItem(
+      CATALOG_KEY,
+      JSON.stringify({ ...found, schemaVersion: CATALOG_SCHEMA_VERSION, voices: found.voices }),
+    );
   } catch {
     /* quota */
   }
 }
 
-async function readJson(key: string, path: string, signal?: AbortSignal): Promise<unknown> {
+type JsonEnvelope = { json: unknown; etag: string | null };
+
+async function readJson(key: string, path: string, signal?: AbortSignal): Promise<JsonEnvelope> {
   const res = await veniceFetch(key, path, { signal });
-  return res.json();
+  return { json: await res.json(), etag: res.headers.get("etag") };
 }
 
-export async function discoverModels(key: string, signal?: AbortSignal): Promise<Discovery> {
+export async function discoverModels(
+  key: string,
+  signal?: AbortSignal,
+  previous?: Discovery | null,
+): Promise<Discovery> {
   const jobs = await Promise.allSettled([
     readJson(key, "/models?type=text", signal),
     readJson(key, "/models?type=tts", signal),
@@ -302,14 +330,34 @@ export async function discoverModels(key: string, signal?: AbortSignal): Promise
       throw job.reason;
     }
   }
-  const jsonAt = (index: number) =>
-    jobs[index]?.status === "fulfilled" ? jobs[index].value : null;
+  const at = (index: number) => {
+    const job = jobs[index];
+    return job?.status === "fulfilled" ? job.value : null;
+  };
+  const jsonAt = (index: number) => at(index)?.json ?? null;
+  const etagAt = (index: number) => at(index)?.etag ?? null;
   const text = parseModels(jsonAt(0));
   const tts = parseModels(jsonAt(1));
   const asr = parseModels(jsonAt(2));
   const traits = parseTraits(jsonAt(3));
   const characters = parseCharacters(jsonAt(4));
-  const compat = parseCompat(jsonAt(5));
+
+  // VEN-001: the mapping endpoint returns alias → canonical model ID. On
+  // schema drift keep the previously cached mapping instead of silently
+  // adopting an empty one.
+  const compatParse = parseCompatibilityMap(jsonAt(5));
+  const notices: string[] = [];
+  let compatMap: CompatibilityMap;
+  let compat: Record<string, string[]>;
+  if (compatParse.recognized) {
+    compatMap = compatParse.map;
+    compat = compatArraysFromMap(compatMap);
+  } else {
+    compatMap = previous?.compatMap ?? {};
+    compat = previous?.compat ?? compatArraysFromMap(compatMap);
+    notices.push("Compatibility data format unrecognized; keeping the last saved mapping.");
+  }
+
   const voices: Record<string, string[]> = {};
   const ttsJson = asRecord(jsonAt(1));
   const ttsData = Array.isArray(ttsJson?.data) ? ttsJson.data : [];
@@ -319,12 +367,26 @@ export async function discoverModels(key: string, signal?: AbortSignal): Promise
     voices[row.id] = voicesFromSpec(asRecord(row.model_spec));
   }
   const failed = jobs.some((job) => job.status === "rejected");
-  const notice = !text.length
-    ? "Text models did not load. Chat traits need a successful catalog refresh."
-    : failed
-      ? "Part of the catalog failed. The rest is live."
-      : "";
-  return { text, tts, asr, traits, voices, characters, compat, fetchedAt: Date.now(), notice };
+  if (!text.length) {
+    notices.push("Text models did not load. Chat traits need a successful catalog refresh.");
+  } else if (failed) {
+    notices.push("Part of the catalog failed. The rest is live.");
+  }
+  return {
+    text,
+    tts,
+    asr,
+    traits,
+    voices,
+    characters,
+    compat,
+    compatMap,
+    fetchedAt: Date.now(),
+    schemaVersion: CATALOG_SCHEMA_VERSION,
+    etag: etagAt(0) ?? etagAt(1) ?? etagAt(2),
+    stale: false,
+    notice: notices.join(" "),
+  };
 }
 
 export async function searchCharacters(
@@ -336,22 +398,124 @@ export async function searchCharacters(
   const path = q
     ? `/characters?limit=30&isAdult=false&search=${encodeURIComponent(q)}`
     : "/characters?limit=30&isAdult=false";
-  return parseCharacters(await readJson(key, path, signal));
+  return parseCharacters((await readJson(key, path, signal)).json);
 }
 
+/**
+ * VEN-008: discriminated result for per-model voice discovery. Non-auth
+ * failures stay visible — "voice catalog unavailable" with retry — instead of
+ * silently degrading to an empty list.
+ */
+export type VoicesFetchResult =
+  | { ok: true; voices: string[] }
+  | {
+      ok: false;
+      reason: "auth" | "http" | "network";
+      message: string;
+      status: number | null;
+      retryable: boolean;
+    };
+
+export async function modelVoicesResult(
+  key: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<VoicesFetchResult> {
+  let res: Response;
+  try {
+    res = await veniceFetch(key, `/models/${encodeURIComponent(id)}`, { signal });
+  } catch (err) {
+    if (err instanceof VeniceError) {
+      const auth = err.status === 401 || err.status === 402;
+      return {
+        ok: false,
+        reason: auth ? "auth" : "http",
+        message: err.message,
+        status: err.status,
+        retryable: !auth,
+      };
+    }
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    return {
+      ok: false,
+      reason: "network",
+      message: err instanceof Error ? err.message : "Voice catalog unavailable.",
+      status: null,
+      retryable: true,
+    };
+  }
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    return {
+      ok: false,
+      reason: "network",
+      message: "Voice catalog response was not readable.",
+      status: res.status,
+      retryable: true,
+    };
+  }
+  const root = asRecord(json);
+  const spec = asRecord(root?.model_spec) ?? asRecord(asRecord(root?.data)?.model_spec);
+  const voices = voicesFromSpec(spec);
+  persistModelVoices(id, voices);
+  return { ok: true, voices };
+}
+
+/**
+ * Backward-compatible wrapper for existing call sites: auth/balance failures
+ * still throw; other failures still resolve to []. Prefer modelVoicesResult so
+ * the failure can surface as "voice catalog unavailable" with a retry.
+ */
 export async function modelVoices(
   key: string,
   id: string,
   signal?: AbortSignal,
 ): Promise<string[]> {
+  const result = await modelVoicesResult(key, id, signal);
+  if (result.ok) return result.voices;
+  if (result.reason === "auth") throw new VeniceError(result.status ?? 401, result.message);
+  return [];
+}
+
+/**
+ * VEN-009: durably fold a model-specific voice list into the cached catalog so
+ * a reload does not lose it. Returns the updated catalog (or the input when
+ * nothing could be cached).
+ */
+export function cacheModelVoices(
+  catalog: Discovery | null,
+  model: string,
+  voices: string[],
+): Discovery | null {
+  const id = model.trim();
+  if (!id || !voices.length) return catalog;
+  const base: Discovery = catalog ?? {
+    text: [],
+    tts: [],
+    asr: [],
+    traits: {},
+    voices: {},
+    characters: [],
+    compat: {},
+    compatMap: {},
+    fetchedAt: Date.now(),
+    schemaVersion: CATALOG_SCHEMA_VERSION,
+    etag: null,
+    stale: false,
+    notice: "",
+  };
+  const next: Discovery = { ...base, voices: { ...base.voices, [id]: voices } };
+  saveCatalog(next);
+  return next;
+}
+
+function persistModelVoices(model: string, voices: string[]): void {
   try {
-    const res = await veniceFetch(key, `/models/${encodeURIComponent(id)}`, { signal });
-    const json = asRecord(await res.json());
-    const spec = asRecord(json?.model_spec) ?? asRecord(asRecord(json?.data)?.model_spec);
-    return voicesFromSpec(spec);
-  } catch (err) {
-    if (err instanceof VeniceError && (err.status === 401 || err.status === 402)) throw err;
-    return [];
+    cacheModelVoices(loadCatalog(), model, voices);
+  } catch {
+    /* storage unavailable — the in-memory catalog still has the voices */
   }
 }
 
@@ -449,11 +613,25 @@ const TOOLS = [
   },
 ];
 
+export type ChatRequestOptions = {
+  /**
+   * VEN-003/004: normalized capabilities of the selected model. When omitted
+   * (or null) chatBody keeps its legacy behavior and sends every set
+   * parameter; when provided, parameters the model explicitly does not
+   * support (`false`) are omitted, and `maxOutputTokens` (when a number)
+   * additionally clamps the requested max output.
+   */
+  capabilities?: ModelCapabilities | null;
+  /** VEN-005: requested reasoning effort; sent only when the model advertises it. */
+  reasoningEffort?: string | null;
+};
+
 export function chatBody(
   persona: Persona,
   turns: Turn[],
   traits: Record<string, string>,
   withTools: boolean,
+  options?: ChatRequestOptions,
 ) {
   const venice_parameters: Record<string, unknown> = {
     include_venice_system_prompt: false,
@@ -466,17 +644,31 @@ export function chatBody(
   if (persona.thinking === "stripped") venice_parameters.strip_thinking_response = true;
 
   const model = resolveTextModel(persona.textModel, traits);
+  const caps = options?.capabilities ?? null;
+  // `null` capability means "not reported" — keep sending (legacy behavior);
+  // an explicit `false` means the model does not support the parameter.
+  const sends = (flag: boolean | null): boolean => flag !== false;
+
   const body: Record<string, unknown> = {
     model,
     messages: [{ role: "system", content: systemContent(persona) }, ...turns.map(toApiMessage)],
-    temperature: persona.temperature,
-    top_p: persona.topP,
     stream: true,
     venice_parameters,
   };
-  if (persona.frequencyPenalty) body.frequency_penalty = persona.frequencyPenalty;
-  if (persona.presencePenalty) body.presence_penalty = persona.presencePenalty;
-  if (persona.maxTokens >= 16) body.max_completion_tokens = persona.maxTokens;
+  if (sends(caps ? caps.temperature : null)) body.temperature = persona.temperature;
+  if (sends(caps ? caps.topP : null)) body.top_p = persona.topP;
+  if (persona.frequencyPenalty && sends(caps ? caps.frequencyPenalty : null))
+    body.frequency_penalty = persona.frequencyPenalty;
+  if (persona.presencePenalty && sends(caps ? caps.presencePenalty : null))
+    body.presence_penalty = persona.presencePenalty;
+  if (persona.maxTokens >= 16) {
+    const cap = caps?.maxOutputTokens;
+    // Resetting to a smaller model must not preserve an oversized request.
+    body.max_completion_tokens =
+      typeof cap === "number" && cap > 0 ? Math.min(persona.maxTokens, cap) : persona.maxTokens;
+  }
+  const effort = resolveReasoningEffort(caps, options?.reasoningEffort);
+  if (effort) body.reasoning_effort = effort;
   if (withTools) body.tools = TOOLS;
   return body;
 }
@@ -563,9 +755,13 @@ function eventsFromChoice(choice: Record<string, unknown>, seen: Set<string>): S
       });
     });
   }
-  if ("finish_reason" in choice) {
-    const reason = choice.finish_reason;
-    out.push({ type: "finish", reason: typeof reason === "string" ? reason : null });
+  if ("finish_reason" in choice && choice.finish_reason != null) {
+    // VEN-011: normalize into the canonical set (stop/length/content_filter/
+    // tool_calls/error); unknown provider reasons pass through unchanged.
+    const reason = normalizeFinishReason(choice.finish_reason);
+    if (reason) {
+      out.push({ type: "finish", reason });
+    }
   }
   harvest(choice, out, seen, 0);
   return out;
@@ -638,8 +834,16 @@ export async function transcribe(
     type.includes("mp4") || type.includes("m4a") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
   const file = new File([blob], `speech.${ext}`, { type: type || "audio/webm" });
   const form = new FormData();
+  // VEN-002: never silently fall back to a hardcoded operational model id.
+  const sttModel = model.trim();
+  if (!sttModel) {
+    throw new VeniceError(
+      400,
+      "No speech-to-text model selected. Choose one in Settings, then retry.",
+    );
+  }
   form.append("file", file);
-  form.append("model", model || "nvidia/parakeet-tdt-0.6b-v3");
+  form.append("model", sttModel);
   form.append("response_format", "json");
   const res = await veniceFetch(key, "/audio/transcriptions", {
     method: "POST",
@@ -660,11 +864,17 @@ export async function synthesize(
   onResponse?: (res: Response) => void,
 ): Promise<ArrayBuffer> {
   const input = text.trim().slice(0, 4096);
+  // VEN-002: the model must come from the persona/catalog — never substitute
+  // a hardcoded operational id when it is missing.
+  const ttsModel = persona.ttsModel.trim();
+  if (!ttsModel) {
+    throw new VeniceError(400, "No TTS model selected. Choose one in Settings, then retry.");
+  }
   const res = await veniceFetch(key, "/audio/speech", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: persona.ttsModel || "tts-xai-v1",
+      model: ttsModel,
       input,
       voice: persona.voice || "eve",
       response_format: "mp3",
@@ -684,11 +894,17 @@ export async function synthesizeStream(
   onResponse?: (res: Response) => void,
 ): Promise<Response> {
   const input = text.trim().slice(0, 1200);
+  // VEN-002: the model must come from the persona/catalog — never substitute
+  // a hardcoded operational id when it is missing.
+  const ttsModel = persona.ttsModel.trim();
+  if (!ttsModel) {
+    throw new VeniceError(400, "No TTS model selected. Choose one in Settings, then retry.");
+  }
   const res = await veniceFetch(key, "/audio/speech", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: persona.ttsModel || "tts-xai-v1",
+      model: ttsModel,
       input,
       voice: persona.voice || "eve",
       response_format: "pcm",
@@ -830,15 +1046,55 @@ export function mergeToolDeltas(
   });
 }
 
+/** Provider tool-call ids are opaque tokens (OpenAI-style "call_…"); never fabricate one. */
+const TOOL_CALL_ID_PATTERN = /^[A-Za-z0-9_-]{4,128}$/;
+
+/**
+ * VEN-010: detect unrecoverable provider tool-call protocol errors. Returns a
+ * user-facing message when an accumulated call lacks a valid provider id or a
+ * function name. Such calls must NOT be repaired with synthetic ids — the
+ * provider would not recognize them — so the tool round terminates with this
+ * error while user-visible text is preserved and regenerate stays possible.
+ */
+export function toolRoundProtocolError(acc: Map<number, ToolCall>): string | null {
+  const entries = [...acc.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [, call] of entries) {
+    if (!call.name.trim()) return "The provider sent a tool call without a function name.";
+    if (!TOOL_CALL_ID_PATTERN.test(call.id.trim()))
+      return `The provider sent tool call "${call.name}" without a valid call id.`;
+  }
+  return null;
+}
+
+/**
+ * VEN-010: only provider-complete calls (valid id + name) are returned.
+ * Incomplete calls are dropped — never assigned synthetic ids — and can be
+ * diagnosed via toolRoundProtocolError.
+ */
 export function finishedTools(acc: Map<number, ToolCall>): ToolCall[] {
   return [...acc.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([, call], i) => ({
-      id: call.id || `call_${i}_${call.name || "tool"}`,
+    .map(([, call]) => ({
+      id: call.id.trim(),
       name: call.name,
       arguments: call.arguments || "{}",
     }))
-    .filter((call) => call.name);
+    .filter((call) => call.name.trim() && TOOL_CALL_ID_PATTERN.test(call.id));
+}
+
+/**
+ * VEN-011: an empty completion (no content, no thinking, no tool calls) must
+ * not produce an invisible persisted assistant turn. The turn flow should
+ * check this before appending the assistant turn.
+ */
+export function shouldPersistAssistantTurn(candidate: {
+  content: string;
+  thinking?: string;
+  toolCalls?: unknown[];
+}): boolean {
+  if (candidate.toolCalls?.length) return true;
+  if (candidate.content.trim()) return true;
+  return Boolean(candidate.thinking?.trim());
 }
 
 async function postJson(

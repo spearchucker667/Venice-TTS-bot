@@ -186,26 +186,50 @@ export const TRAITS = [
   "function_calling_default",
 ] as const;
 
+/**
+ * VEN-002: last-known vendor catalog snapshot. These entries exist ONLY so the
+ * UI has something to show when live discovery has not run or has failed;
+ * every entry carries an explicit `stale` flag and must never be treated as a
+ * provider-confirmed ID. New selections must come from the live catalog.
+ */
+export type LastKnownModelEntry = { id: string; name: string; stale: true };
+
+export const LAST_KNOWN_TTS_MODELS: LastKnownModelEntry[] = [
+  { id: "tts-xai-v1", name: "xAI", stale: true },
+  { id: "tts-kokoro", name: "Kokoro", stale: true },
+  { id: "tts-orpheus", name: "Orpheus", stale: true },
+];
+
+export const LAST_KNOWN_STT_MODELS: LastKnownModelEntry[] = [
+  { id: "nvidia/parakeet-tdt-0.6b-v3", name: "Parakeet", stale: true },
+  { id: "openai/whisper-large-v3", name: "Whisper", stale: true },
+  { id: "stt-xai-v1", name: "xAI speech", stale: true },
+];
+
+export const TTS_FALLBACK = LAST_KNOWN_TTS_MODELS;
+export const STT_FALLBACK = LAST_KNOWN_STT_MODELS;
+
+/** Whether an id belongs to the last-known stale snapshot (not live-confirmed). */
+export function isLastKnownModelId(id: string): boolean {
+  const trimmed = id.trim();
+  return (
+    LAST_KNOWN_TTS_MODELS.some((entry) => entry.id === trimmed) ||
+    LAST_KNOWN_STT_MODELS.some((entry) => entry.id === trimmed)
+  );
+}
+
+/** Last-known voice lists for the stale TTS entries above; refreshed by discovery. */
 export const XAI_VOICES = ["eve", "ara", "rex", "sal", "leo", "luna", "orion", "carina"];
 
+/** True while VOICE_FALLBACK only holds last-known (stale, unconfirmed) voice lists. */
+export const VOICE_FALLBACK_STALE = true;
+
 export const VOICE_FALLBACK: Record<string, string[]> = {
-  "tts-xai-v1": XAI_VOICES,
+  "tts-xai-v1": [...XAI_VOICES],
   "tts-kokoro": ["af_sky", "af_bella", "af_heart", "am_adam", "am_michael", "bf_emma", "bm_george"],
   "tts-orpheus": ["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"],
   "tts-qwen3-0-6b": ["Vivian", "Serena", "Dylan"],
 };
-
-export const TTS_FALLBACK = [
-  { id: "tts-xai-v1", name: "xAI" },
-  { id: "tts-kokoro", name: "Kokoro" },
-  { id: "tts-orpheus", name: "Orpheus" },
-];
-
-export const STT_FALLBACK = [
-  { id: "nvidia/parakeet-tdt-0.6b-v3", name: "Parakeet" },
-  { id: "openai/whisper-large-v3", name: "Whisper" },
-  { id: "stt-xai-v1", name: "xAI speech" },
-];
 
 export const DEFAULT_PERSONA: Persona = {
   name: "Ember",
@@ -219,10 +243,13 @@ export const DEFAULT_PERSONA: Persona = {
   promptMode: "blend",
   vad: 0.045,
   textModel: "trait:function_calling_default",
-  ttsModel: "tts-xai-v1",
+  // VEN-002: factory defaults reference the flagged last-known entries so a
+  // fresh install speaks before the first catalog refresh; live discovery
+  // replaces them with provider-confirmed IDs.
+  ttsModel: LAST_KNOWN_TTS_MODELS[0]?.id ?? "",
   voice: "eve",
   speed: 1,
-  sttModel: "nvidia/parakeet-tdt-0.6b-v3",
+  sttModel: LAST_KNOWN_STT_MODELS[0]?.id ?? "",
   characterSlug: "",
   webSearch: "off",
   thinking: "live",
@@ -265,15 +292,30 @@ function asLamp(v: unknown): LampId {
   return LAMPS.some((lamp) => lamp.id === v) ? (v as LampId) : "ember";
 }
 
-function asPreset(v: unknown): PresetId {
-  return v === "balanced" ||
+function isPresetId(v: unknown): v is PresetId {
+  return (
+    v === "balanced" ||
     v === "creative" ||
     v === "precise" ||
     v === "reasoning" ||
     v === "coding" ||
     v === "custom"
-    ? v
-    : "custom";
+  );
+}
+
+function asPreset(v: unknown): PresetId {
+  return isPresetId(v) ? v : "custom";
+}
+
+/**
+ * STATE-005: persisted-schema migration for the preset field. Pre-preset
+ * personas have no preset field at all; they behaved like the balanced
+ * default, so a missing field migrates to "balanced" — not to the asPreset
+ * fallback "custom", which is reserved for present-but-unknown values.
+ */
+function migratePreset(v: unknown): PresetId {
+  if (v === undefined) return "balanced";
+  return asPreset(v);
 }
 
 function asPromptMode(v: unknown): PromptMode {
@@ -298,10 +340,12 @@ export function loadPersona(): Persona {
         typeof p.systemPrompt === "string" && p.systemPrompt.trim()
           ? p.systemPrompt.slice(0, 8000)
           : DEFAULT_PROMPT,
-      temperature: clamp(Number(p.temperature), 0, 2),
+      // STATE-003: a missing temperature must migrate to the 0.7 default, not
+      // clamp NaN down to 0.
+      temperature: clamp(Number(p.temperature ?? DEFAULT_PERSONA.temperature), 0, 2),
       topP: clamp(Number(p.topP ?? 1), 0, 1),
       maxTokens: clamp(Math.round(Number(p.maxTokens ?? 0)), 0, 8192),
-      preset: asPreset(p.preset),
+      preset: migratePreset(p.preset),
       frequencyPenalty: clamp(Number(p.frequencyPenalty ?? 0), -2, 2),
       presencePenalty: clamp(Number(p.presencePenalty ?? 0), -2, 2),
       promptMode: asPromptMode(p.promptMode),
@@ -311,7 +355,9 @@ export function loadPersona(): Persona {
       ttsModel:
         typeof p.ttsModel === "string" && p.ttsModel ? p.ttsModel : DEFAULT_PERSONA.ttsModel,
       voice: typeof p.voice === "string" && p.voice.trim() ? p.voice.trim().slice(0, 64) : "eve",
-      speed: clamp(Number(p.speed), 0.25, 4),
+      // STATE-004: a missing speed must migrate to the 1 default, not clamp
+      // NaN down to the 0.25 minimum.
+      speed: clamp(Number(p.speed ?? DEFAULT_PERSONA.speed), 0.25, 4),
       sttModel:
         typeof p.sttModel === "string" && p.sttModel ? p.sttModel : DEFAULT_PERSONA.sttModel,
       characterSlug: typeof p.characterSlug === "string" ? p.characterSlug.trim().slice(0, 80) : "",
@@ -327,37 +373,65 @@ export function loadPersona(): Persona {
   }
 }
 
-export function savePersona(p: Persona): void {
-  const safe: Persona = {
-    ...p,
-    name: p.name.trim().slice(0, 48) || "Ember",
-    systemPrompt: p.systemPrompt.trim().slice(0, 8000) || DEFAULT_PROMPT,
-    temperature: clamp(p.temperature, 0, 2),
-    topP: clamp(p.topP, 0, 1),
-    maxTokens: clamp(Math.round(p.maxTokens), 0, 8192),
-    preset: asPreset(p.preset),
-    frequencyPenalty: clamp(p.frequencyPenalty, -2, 2),
-    presencePenalty: clamp(p.presencePenalty, -2, 2),
-    promptMode: asPromptMode(p.promptMode),
-    vad: clamp(p.vad, 0.02, 0.2),
-    speed: clamp(p.speed, 0.25, 4),
-    voice: p.voice.trim().slice(0, 64) || "eve",
-    characterSlug: p.characterSlug.trim().slice(0, 80),
-    webSearch: asSearch(p.webSearch),
-    thinking: asThinking(p.thinking),
-    tools: Boolean(p.tools),
-    speak: Boolean(p.speak),
-    lamp: asLamp(p.lamp),
-    flow: asFlow(p.flow),
-  };
-  localStorage.setItem(PERSONA_KEY, JSON.stringify(safe));
+export type SavePersonaResult =
+  { ok: true } | { ok: false; reason: "quota" | "unavailable" | "invalid" };
+
+function storageFailureReason(err: unknown): "quota" | "unavailable" {
+  if (err instanceof DOMException && err.name === "QuotaExceededError") return "quota";
+  return "unavailable";
+}
+
+/**
+ * STATE-002: persisting settings must never break an interaction. Quota,
+ * security and serialization failures return a structured result instead of
+ * throwing; surfacing that failure in the UI is a later phase.
+ */
+export function savePersona(p: Persona): SavePersonaResult {
+  if (!p || typeof p !== "object") return { ok: false, reason: "invalid" };
+  let raw: string;
+  try {
+    const safe: Persona = {
+      ...p,
+      name: p.name.trim().slice(0, 48) || "Ember",
+      systemPrompt: p.systemPrompt.trim().slice(0, 8000) || DEFAULT_PROMPT,
+      temperature: clamp(p.temperature, 0, 2),
+      topP: clamp(p.topP, 0, 1),
+      maxTokens: clamp(Math.round(p.maxTokens), 0, 8192),
+      preset: asPreset(p.preset),
+      frequencyPenalty: clamp(p.frequencyPenalty, -2, 2),
+      presencePenalty: clamp(p.presencePenalty, -2, 2),
+      promptMode: asPromptMode(p.promptMode),
+      vad: clamp(p.vad, 0.02, 0.2),
+      speed: clamp(p.speed, 0.25, 4),
+      voice: p.voice.trim().slice(0, 64) || "eve",
+      characterSlug: p.characterSlug.trim().slice(0, 80),
+      webSearch: asSearch(p.webSearch),
+      thinking: asThinking(p.thinking),
+      tools: Boolean(p.tools),
+      speak: Boolean(p.speak),
+      lamp: asLamp(p.lamp),
+      flow: asFlow(p.flow),
+    };
+    raw = JSON.stringify(safe);
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  try {
+    localStorage.setItem(PERSONA_KEY, raw);
+  } catch (err) {
+    return { ok: false, reason: storageFailureReason(err) };
+  }
+  return { ok: true };
 }
 
 export function loadKeyMode(): KeyMode {
   try {
-    return localStorage.getItem(KEY_MODE) === "session" ? "session" : "remember";
+    // STATE-001: "remember" is an explicit opt-in; anything else — including
+    // no stored choice — defaults to session-only storage. Users who already
+    // chose "remember" keep that choice through the persisted record.
+    return localStorage.getItem(KEY_MODE) === "remember" ? "remember" : "session";
   } catch {
-    return "remember";
+    return "session";
   }
 }
 
@@ -407,9 +481,7 @@ export function loadMessages(): Turn[] {
   try {
     const raw = sessionStorage.getItem(MSG_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isTurn).slice(-40);
+    return validateTurns(JSON.parse(raw) as unknown).slice(-40);
   } catch {
     return [];
   }
@@ -429,15 +501,79 @@ function isCitation(v: unknown): v is Citation {
   return typeof o.title === "string" && typeof o.url === "string";
 }
 
-function isTurn(v: unknown): v is Turn {
-  if (!v || typeof v !== "object") return false;
-  const o = v as { role?: string; content?: string; citations?: unknown };
-  if (typeof o.content !== "string") return false;
-  if (o.role !== "user" && o.role !== "assistant" && o.role !== "tool") return false;
-  if (o.role === "assistant" && o.citations !== undefined) {
-    if (!Array.isArray(o.citations) || !o.citations.every(isCitation)) return false;
+/**
+ * STATE-006: canonical persisted-ToolCall validator. One tool call is valid
+ * only with a non-empty provider id, a function name and a string arguments
+ * payload — fields the API round-trip actually requires.
+ */
+export function validateToolCall(v: unknown): ToolCall | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as { id?: unknown; name?: unknown; arguments?: unknown };
+  if (typeof o.id !== "string" || !o.id.trim()) return null;
+  if (typeof o.name !== "string" || !o.name.trim()) return null;
+  if (typeof o.arguments !== "string") return null;
+  return { id: o.id, name: o.name, arguments: o.arguments };
+}
+
+/**
+ * STATE-006: the one canonical Turn schema, shared by session storage,
+ * IndexedDB history, import/export and API context building.
+ * - tool turns REQUIRE tool_call_id + name;
+ * - assistant tool_calls are fully validated when present.
+ * Returns null for anything else — invalid data is dropped, never coerced.
+ */
+export function validateTurn(v: unknown): Turn | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as {
+    role?: unknown;
+    content?: unknown;
+    thinking?: unknown;
+    tool_call_id?: unknown;
+    name?: unknown;
+    tool_calls?: unknown;
+    citations?: unknown;
+  };
+  if (typeof o.content !== "string") return null;
+  if (o.role === "user") return { role: "user", content: o.content };
+  if (o.role === "assistant") {
+    const turn: Extract<Turn, { role: "assistant" }> = { role: "assistant", content: o.content };
+    if (o.thinking !== undefined) {
+      if (typeof o.thinking !== "string") return null;
+      turn.thinking = o.thinking;
+    }
+    if (o.citations !== undefined) {
+      if (!Array.isArray(o.citations) || !o.citations.every(isCitation)) return null;
+      turn.citations = o.citations;
+    }
+    if (o.tool_calls !== undefined) {
+      if (!Array.isArray(o.tool_calls)) return null;
+      const calls: ToolCall[] = [];
+      for (const raw of o.tool_calls) {
+        const call = validateToolCall(raw);
+        if (!call) return null;
+        calls.push(call);
+      }
+      turn.tool_calls = calls;
+    }
+    return turn;
   }
-  return true;
+  if (o.role === "tool") {
+    if (typeof o.tool_call_id !== "string" || !o.tool_call_id.trim()) return null;
+    if (typeof o.name !== "string" || !o.name.trim()) return null;
+    return { role: "tool", content: o.content, tool_call_id: o.tool_call_id, name: o.name };
+  }
+  return null;
+}
+
+/** Validate a persisted array of turns, dropping invalid entries in order. */
+export function validateTurns(v: unknown): Turn[] {
+  if (!Array.isArray(v)) return [];
+  const out: Turn[] = [];
+  for (const raw of v) {
+    const turn = validateTurn(raw);
+    if (turn) out.push(turn);
+  }
+  return out;
 }
 
 export function loadHosts(): string[] {
@@ -510,14 +646,67 @@ export function resolveTextModel(selection: string, traits: Record<string, strin
   return selection;
 }
 
-export function contextWindow(turns: Turn[], budget = 6000): Turn[] {
+export const MIN_HISTORY_BUDGET_TOKENS = 1024;
+export const DEFAULT_PROVIDER_RESERVE_TOKENS = 512;
+
+/** VEN-006 inputs for deriving a history budget from catalog-reported context. */
+export type ContextBudgetInput = {
+  /** Model's reported context length in tokens (null/undefined when unknown). */
+  modelContextTokens?: number | null;
+  systemPrompt?: string;
+  /** Tool schema object sent alongside the request (JSON-estimated). */
+  toolSchema?: unknown;
+  /** The request's own max output (max_completion_tokens), if set. */
+  requestedMaxOutput?: number;
+  /** Provider-side reserve; defaults to DEFAULT_PROVIDER_RESERVE_TOKENS. */
+  providerReserve?: number;
+};
+
+function schemaTokenEstimate(schema: unknown): number {
+  if (schema == null) return 0;
+  try {
+    return estimateTokens(JSON.stringify(schema));
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * VEN-006: safe history budget derived from the model's reported context:
+ *
+ *   model context − system prompt − tool schema − requested max output
+ *   − provider reserve = history budget
+ *
+ * Heuristic tokenization (~4 chars/token) is used throughout; the budget
+ * scales with the model context and keeps a floor so small models remain
+ * usable. Returns null when no model context is known — callers keep their
+ * legacy default rather than guessing.
+ */
+export function historyBudget(input: ContextBudgetInput = {}): number | null {
+  const model = Number(input.modelContextTokens);
+  if (!Number.isFinite(model) || model <= 0) return null;
+  const system = estimateTokens(input.systemPrompt ?? "");
+  const schema = schemaTokenEstimate(input.toolSchema);
+  const requested = Math.max(0, Math.round(Number(input.requestedMaxOutput ?? 0) || 0));
+  const reserveRaw = Number(input.providerReserve ?? DEFAULT_PROVIDER_RESERVE_TOKENS);
+  const reserve = Number.isFinite(reserveRaw)
+    ? Math.max(0, Math.round(reserveRaw))
+    : DEFAULT_PROVIDER_RESERVE_TOKENS;
+  const budget = Math.round(model) - system - schema - requested - reserve;
+  return Math.max(MIN_HISTORY_BUDGET_TOKENS, budget);
+}
+
+export function contextWindow(turns: Turn[], budget: number | ContextBudgetInput = 6000): Turn[] {
+  // VEN-006: a number keeps the legacy fixed budget; a ContextBudgetInput
+  // derives the budget from the selected model's reported context.
+  const tokens = typeof budget === "number" ? budget : (historyBudget(budget) ?? 6000);
   const kept: Turn[] = [];
   let used = 0;
   for (let i = turns.length - 1; i >= 0 && kept.length < 32; i--) {
     const turn = turns[i];
     if (!turn) break;
     const cost = estimateTokens(turn.content) + 12;
-    if (kept.length && used + cost > budget) break;
+    if (kept.length && used + cost > tokens) break;
     kept.push(turn);
     used += cost;
   }

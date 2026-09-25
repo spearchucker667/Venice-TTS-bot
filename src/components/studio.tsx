@@ -209,6 +209,15 @@ export function Studio() {
       onImport={(file) => void ember.importChats(file)}
       onOpenSettings={openSettings}
       onClearAll={ember.clearAllChats}
+      onExportChat={ember.exportChat}
+      onApplyDefaults={ember.applyDefaultsToChat}
+      notice={ember.notice}
+      onDismissNotice={ember.clearNotice}
+      deleteToast={ember.deleteToast}
+      onUndoDelete={ember.undoDelete}
+      onDismissDelete={ember.dismissDeleteToast}
+      incognito={ember.incognito}
+      onToggleIncognito={ember.setIncognito}
     />
   );
   let lastUser = -1;
